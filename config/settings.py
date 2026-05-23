@@ -21,5 +21,5 @@ def get_llm(model: str = None, temperature: float = 0):
     return ChatOpenRouter(
         model=model or LLM_MODEL,
         temperature=temperature,
-        openrouter_api_key=OPENROUTER_API_KEY,
+        api_key=OPENROUTER_API_KEY,
     )
