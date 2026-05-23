@@ -1,7 +1,7 @@
 """
 예적금 상담 에이전트 - Streamlit UI
 - 기본 챗봇 UI (대화 히스토리 유지)
-- 사이드바: 고객 선택, Vector DB 상태 표시
+- 사이드바: DB 연결 상태, Vector DB 상태 표시
 """
 import streamlit as st
 from dotenv import load_dotenv
@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from graph.builder import build_graph
-from db.customer_db import get_customer_list, get_customer, format_customer_info
+from db.postgres_db import test_connection
 from db.vectorstore import get_vectorstore
 
 
@@ -68,9 +68,6 @@ if "graph" not in st.session_state:
 if "conversation_messages" not in st.session_state:
     st.session_state.conversation_messages = []
 
-if "member_id" not in st.session_state:
-    st.session_state.member_id = None
-
 # ─── 기존 대화 히스토리 표시 ───
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖"):
@@ -93,7 +90,7 @@ if prompt := st.chat_input("궁금한 점을 입력하세요..."):
                 result = st.session_state.graph.invoke({
                     "messages": st.session_state.conversation_messages,
                     "next": "",
-                    "member_id": st.session_state.member_id,
+                    "member_id": None,
                     "context": None,
                 })
 

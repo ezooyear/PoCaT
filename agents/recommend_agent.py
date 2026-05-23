@@ -1,7 +1,7 @@
 """
 Recommend 에이전트 (추천/안내) - Tool 기반
 - LLM이 필요한 Tool을 선택하여 호출
-- 목적별 상품 추천, 약관 안내 등
+- NL2SQL로 DB 조회 + RAG로 약관 검색
 """
 from langchain_core.messages import SystemMessage, AIMessage, ToolMessage
 
@@ -20,14 +20,7 @@ def recommend_agent_node(state: AgentState) -> dict:
     llm = get_llm()
     llm_with_tools = llm.bind_tools(RECOMMEND_TOOLS)
 
-    # 고객 ID 정보를 시스템 프롬프트에 주입
-    member_id = state.get("member_id")
     system_prompt = RECOMMEND_SYSTEM_PROMPT
-    if member_id:
-        system_prompt += f"\n\n## 현재 상담 중인 고객 ID: {member_id}\nTool 호출 시 이 고객 ID를 사용하세요."
-    else:
-        system_prompt += "\n\n## 현재 상담 중인 고객: 없음 (일반 상담 모드)"
-
     messages = [SystemMessage(content=system_prompt)] + list(state["messages"])
 
     # Tool 호출 루프 (최대 3회 반복)
