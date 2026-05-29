@@ -1,7 +1,6 @@
 """
 예적금 상담 에이전트 - Streamlit UI
 - 기본 챗봇 UI (대화 히스토리 유지)
-- 사이드바: DB 연결 상태, Vector DB 상태 표시
 """
 import streamlit as st
 from dotenv import load_dotenv
@@ -23,6 +22,24 @@ st.set_page_config(
 # ─── 커스텀 스타일 ───
 st.markdown("""
 <style>
+
+    /* Streamlit 기본 UI 숨기기 */
+    header {
+        visibility: hidden;
+    }
+
+    #MainMenu {
+        visibility: hidden;
+    }
+
+    footer {
+        visibility: hidden;
+    }
+
+    .stDeployButton {
+        display: none;
+    }
+
     /* 메인 헤더 스타일 */
     .main-header {
         text-align: center;
@@ -97,6 +114,9 @@ if prompt := st.chat_input("궁금한 점을 입력하세요..."):
                 # AI 응답 추출
                 ai_message = result["messages"][-1]
                 ai_content = ai_message.content if hasattr(ai_message, "content") else str(ai_message)
+
+                # ⚠️ 챗봇이 프롬프트를 무시하고 <br> 태그를 출력하는 경우를 대비한 강제 전처리
+                ai_content = ai_content.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
 
                 st.markdown(ai_content)
 

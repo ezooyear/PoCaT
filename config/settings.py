@@ -9,8 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ─── 환경변수 ───
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
-FSS_API_KEY = os.getenv("FSS_API_KEY", "0VZ3JA8KE01E3V6BCR1F")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b:free")
 
 

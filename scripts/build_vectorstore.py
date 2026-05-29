@@ -1,7 +1,6 @@
 """
 Vector DB 빌드 스크립트
 - data/pdfs/ 폴더에 있는 PDF 파일들을 읽어 ChromaDB에 저장합니다.
-- 사용법: python scripts/build_vectorstore.py
 
 PDF 파일을 추가/변경한 후 이 스크립트를 다시 실행하면 DB가 재구축됩니다.
 """
