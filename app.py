@@ -115,6 +115,9 @@ if prompt := st.chat_input("궁금한 점을 입력하세요..."):
                 ai_message = result["messages"][-1]
                 ai_content = ai_message.content if hasattr(ai_message, "content") else str(ai_message)
 
+                # ⚠️ 챗봇이 프롬프트를 무시하고 <br> 태그를 출력하는 경우를 대비한 강제 전처리
+                ai_content = ai_content.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+
                 st.markdown(ai_content)
 
                 # 대화 히스토리 갱신

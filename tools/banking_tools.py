@@ -31,7 +31,7 @@ NL2SQL_SYSTEM_PROMPT = f"""당신은 PostgreSQL 전문가입니다.
 - 고객 이름은 "고객_001" 형식입니다.
 
 ## 도메인 용어 매핑 규칙 (매우 중요)
-- 사용자가 "군인", "직업군인", "장기복무", "장교", "부사관" 등을 언급하면, 상품명(product_name) 검색 시 `LIKE '%국군%' OR LIKE '%장병%' OR LIKE '%장기복무%'` 등 관련 키워드를 폭넓게 사용하여 검색하세요.
+- 사용자가 "군인", "직업군인", "장기복무", "장교", "부사관" 등을 언급하면, 상품명(product_name) 검색 시 `LIKE '%간부%' OR LIKE '%장병%' OR LIKE '%직업군인%'` 등 관련 키워드를 폭넓게 사용하여 검색하세요.
 """
 
 
@@ -77,7 +77,7 @@ def get_db_schema() -> str:
 
 
 # ───────────────────────────────────────────
-# 3. RAG 검색 Tool (기존 유지)
+# 3. RAG 검색 Tool
 # ───────────────────────────────────────────
 @tool
 def search_product_info(query: str) -> str:
@@ -101,7 +101,7 @@ def search_product_info(query: str) -> str:
 
 
 # ───────────────────────────────────────────
-# 4. 이자 계산 Tool (기존 유지)
+# 4. 이자 계산 Tool
 # ───────────────────────────────────────────
 @tool
 def calculate_interest(
@@ -335,7 +335,6 @@ def check_bonus_rate_eligibility(customer_name: str) -> str:
 # ───────────────────────────────────────────
 PRODUCT_TOOLS = [
     query_database, get_db_schema, search_product_info,
-    check_early_termination, check_bonus_rate_eligibility,
 ]
 ANALYSIS_TOOLS = [
     query_database, get_db_schema, search_product_info, calculate_interest,
