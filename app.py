@@ -1,7 +1,6 @@
 """
 예적금 상담 에이전트 - Streamlit UI
 - 기본 챗봇 UI (대화 히스토리 유지)
-- 사이드바: DB 연결 상태, Vector DB 상태 표시
 """
 import streamlit as st
 from dotenv import load_dotenv
@@ -23,6 +22,24 @@ st.set_page_config(
 # ─── 커스텀 스타일 ───
 st.markdown("""
 <style>
+
+    /* Streamlit 기본 UI 숨기기 */
+    header {
+        visibility: hidden;
+    }
+
+    #MainMenu {
+        visibility: hidden;
+    }
+
+    footer {
+        visibility: hidden;
+    }
+
+    .stDeployButton {
+        display: none;
+    }
+
     /* 메인 헤더 스타일 */
     .main-header {
         text-align: center;

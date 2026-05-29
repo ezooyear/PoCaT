@@ -34,7 +34,7 @@ DB_SCHEMA = """
 | 컬럼 | 타입 | 설명 |
 |---|---|---|
 | product_id | INT (PK) | 상품 고유 ID |
-| product_name | VARCHAR(100) | 상품명 (예: KB Star 정기예금). ※ 주의: 군인/군 간부 관련 상품은 이름에 '장병', '국군', '장교', '부사관', '장기복무' 등의 키워드가 포함될 수 있습니다. |
+| product_name | VARCHAR(100) | 상품명 (예: KB Star 정기예금). ※ 주의: 군인/군 간부 관련 상품은 이름에 '장병', '군인', '간부' 등의 키워드가 포함될 수 있습니다. |
 | product_type | VARCHAR(20) | 상품 유형 (예금/적금) |
 | join_channel | VARCHAR(200) | 가입 채널 |
 | min_amount | BIGINT | 최소 가입 금액 |

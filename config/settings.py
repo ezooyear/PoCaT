@@ -10,7 +10,6 @@ load_dotenv()
 
 # ─── 환경변수 ───
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-FSS_API_KEY = os.getenv("FSS_API_KEY", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b:free")
 
 

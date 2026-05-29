@@ -1,7 +1,6 @@
 """
 그래프 빌더
-- Phase 1: 단순 챗봇 그래프 (START → coordinator → END)
-- Phase 2: Supervisor 패턴 (START → supervisor → agents → supervisor → END)
+- Supervisor 패턴 (START → supervisor → agents → supervisor → END)
 """
 from langgraph.graph import StateGraph, START, END
 
@@ -22,9 +21,9 @@ def _supervisor_router(state: AgentState) -> str:
     return next_agent
 
 
-def build_graph_phase2():
+def build_graph():
     """
-    Phase 2: Supervisor 패턴 그래프
+    Supervisor 패턴 그래프
 
     START → Supervisor → (conditional) → product_agent / analysis_agent / recommend_agent / END
                   ↑                              |
@@ -62,9 +61,3 @@ def build_graph_phase2():
     # 컴파일
     graph = builder.compile()
     return graph
-
-
-def build_graph():
-    """현재 Phase에 맞는 그래프를 반환합니다."""
-    # Phase 2: Supervisor 패턴
-    return build_graph_phase2()
