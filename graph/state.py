@@ -17,3 +17,9 @@ class AgentState(TypedDict):
     member_id: Optional[str]
     # 작업 컨텍스트 (조회 결과 등 에이전트 간 데이터 전달)
     context: Optional[dict]
+    # Supervisor가 수립한 에이전트 실행 계획 (예: ["customer_agent", "recommend_agent"])
+    plan: list[str]
+    # 현재 plan에서 완료한 단계 수
+    current_step: int
+    # 각 에이전트의 작업 결과 저장소 (예: {"customer_agent": "고객 정보...", "recommend_agent": "추천 결과..."})
+    agent_outputs: dict

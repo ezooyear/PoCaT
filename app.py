@@ -109,6 +109,9 @@ if prompt := st.chat_input("궁금한 점을 입력하세요..."):
                     "next": "",
                     "member_id": None,
                     "context": None,
+                    "plan": [],
+                    "current_step": 0,
+                    "agent_outputs": {},
                 })
 
                 # AI 응답 추출
