@@ -10,6 +10,13 @@ python-dotenv>=1.0.0
 # Data
 requests>=2.31.0
 pydantic>=2.0.0
+pandas
+
+# DB
+psycopg2-binary
+
+# LLM API
+openai
 
 # PDF & RAG
 pypdf>=4.0.0
@@ -17,6 +24,8 @@ chromadb>=0.5.0
 sentence-transformers>=3.0.0
 langchain-community>=0.3.0
 langchain-huggingface>=0.1.0
+torch
+torchvision
 
 # UI
 streamlit>=1.30.0
