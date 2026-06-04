@@ -214,3 +214,106 @@ def test_connection() -> bool:
         return True
     except Exception:
         return False
+
+def execute_query_dict(sql: str, max_rows: int = 100) -> list[dict]:
+    """
+    SELECT 쿼리를 실행하고 list[dict] 형태로 반환합니다.
+    Agent State 저장용으로 사용합니다.
+    """
+    is_safe, message = validate_sql(sql)
+    if not is_safe:
+        raise ValueError(f"쿼리 차단: {message}")
+
+    sql_upper = sql.strip().upper()
+    if "LIMIT" not in sql_upper:
+        sql = sql.strip().rstrip(";").strip() + f" LIMIT {max_rows};"
+
+    conn = get_connection()
+    cursor = None
+
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(sql)
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    finally:
+        if cursor:
+            cursor.close()
+        conn.close()
+
+
+def get_customer_dashboard_data(customer_id: int) -> dict:
+    """
+    customer_id 기준으로 고객 기본정보, 가입 계좌, 납입 이력을 조회합니다.
+    NL2SQL에 맡기지 않고 고정 SQL로 안정적으로 조회합니다.
+    """
+
+    customer_id = int(customer_id)
+
+    customer_sql = f"""
+    SELECT
+        customer_id,
+        customer_name,
+        birth_date,
+        customer_job,
+        annual_income,
+        income_level,
+        main_bank_yn,
+        salary_transfer_yn,
+        auto_transfer_yn,
+        card_usage_yn,
+        marketing_agree_yn,
+        transaction_months,
+        available_monthly_saving
+    FROM customers
+    WHERE customer_id = {customer_id}
+    """
+
+    accounts_sql = f"""
+    SELECT
+        a.account_id,
+        a.customer_id,
+        a.product_id,
+        p.product_name,
+        p.product_type,
+        a.account_number,
+        a.join_date,
+        a.maturity_date,
+        a.contract_months,
+        a.deposit_amount,
+        a.monthly_amount,
+        a.current_balance,
+        a.account_status,
+        a.applied_rate
+    FROM customer_accounts a
+    JOIN products p
+        ON a.product_id = p.product_id
+    WHERE a.customer_id = {customer_id}
+    ORDER BY a.account_status, a.maturity_date
+    """
+
+    payment_sql = f"""
+    SELECT
+        ph.payment_id,
+        ph.account_id,
+        ph.payment_date,
+        ph.payment_amount,
+        ph.payment_round
+    FROM payment_history ph
+    JOIN customer_accounts a
+        ON ph.account_id = a.account_id
+    WHERE a.customer_id = {customer_id}
+    ORDER BY ph.account_id, ph.payment_round
+    """
+
+    customer_rows = execute_query_dict(customer_sql, max_rows=1)
+    account_rows = execute_query_dict(accounts_sql, max_rows=100)
+    payment_rows = execute_query_dict(payment_sql, max_rows=500)
+
+    return {
+        "customer_id": customer_id,
+        "customer": customer_rows[0] if customer_rows else None,
+        "accounts": account_rows,
+        "payment_history": payment_rows,
+    }

@@ -1,147 +1,206 @@
 """
 그래프 빌더
 - Supervisor 패턴
-- 기존: START → supervisor → agent → END
-- 수정: START → supervisor → agent(s) → validation_agent → supervisor_final → END
+- START → supervisor → agent(s) → supervisor_final → END
+- plan에 따라 여러 Agent가 순차 실행됨
+- 무거운 Agent는 lazy wrapper로 실행 시점에 import
 """
+
 from langgraph.graph import StateGraph, START, END
-
 from graph.state import AgentState
-from agents.supervisor import supervisor_node
-from agents.product_agent import product_agent_node
-from agents.analysis_agent import analysis_agent_node
-from agents.recommend_agent import recommend_agent_node
 
-# 새로 추가할 노드
-from agents.validation_agent import validation_agent_node
-from agents.supervisor_final import supervisor_final_node
+
+AGENT_NODES = {
+    "customer_agent",
+    "calculation_agent",
+    "product_agent",
+    "recommend_agent",
+    "validation_agent",
+    "supervisor_final",
+}
 
 
 def _supervisor_router(state: AgentState) -> str:
-    """
-    Supervisor의 라우팅 결과에 따라 다음 노드를 결정합니다.
-    """
-    next_agent = state.get("next", "FINISH")
+    next_agent = state.get("next")
+    plan = state.get("plan") or []
+
+    if not next_agent and plan:
+        next_agent = plan[0]
 
     if next_agent == "FINISH":
         return "supervisor_final"
 
-    return next_agent
+    if next_agent in AGENT_NODES:
+        return next_agent
 
-
-def _after_analysis_router(state: AgentState) -> str:
-    """
-    Analysis Agent 이후 흐름 결정.
-    복합 추천/갈아타기 질문이면 Product Agent로 이어가고,
-    단순 분석 질문이면 supervisor_final로 이동.
-    """
-    task_type = state.get("task_type")
-
-    if task_type in ["recommendation", "switch_analysis", "early_termination"]:
-        return "product_agent"
+    if plan and plan[0] in AGENT_NODES:
+        return plan[0]
 
     return "supervisor_final"
 
 
-def _after_product_router(state: AgentState) -> str:
-    """
-    Product Agent 이후 흐름 결정.
-    복합 추천/갈아타기 질문이면 Recommend Agent로 이어가고,
-    단순 상품 설명 질문이면 supervisor_final로 이동.
-    """
-    task_type = state.get("task_type")
+def _route_after(current_node: str):
+    def router(state: AgentState) -> str:
+        plan = state.get("plan") or []
 
-    if task_type in ["recommendation", "switch_analysis", "early_termination"]:
-        return "recommend_agent"
+        if not plan:
+            return "supervisor_final"
 
-    return "supervisor_final"
+        if current_node in plan:
+            current_index = plan.index(current_node)
+            next_index = current_index + 1
+
+            if next_index < len(plan):
+                next_node = plan[next_index]
+
+                if next_node in AGENT_NODES:
+                    return next_node
+
+        return "supervisor_final"
+
+    return router
 
 
-def _after_recommend_router(state: AgentState) -> str:
-    """
-    Recommend Agent 이후에는 추천 결과 검증을 수행.
-    """
-    return "validation_agent"
+def supervisor_lazy_node(state: AgentState) -> dict:
+    from agents.supervisor import supervisor_node
+    result = supervisor_node(state)
+    return result if result is not None else {"next": "supervisor_final"}
+
+
+def customer_lazy_node(state: AgentState) -> dict:
+    from agents.customer_agent import customer_agent_node
+    result = customer_agent_node(state)
+    return result if result is not None else {
+        "customer_result": {
+            "ok": False,
+            "error": "customer_agent_node returned None",
+        },
+        "errors": ["customer_agent_node returned None"],
+    }
+
+
+def calculation_lazy_node(state: AgentState) -> dict:
+    from agents.calculation_agent import calculation_agent_node
+    result = calculation_agent_node(state)
+    return result if result is not None else {
+        "calculation_result": {
+            "ok": False,
+            "error": "calculation_agent_node returned None",
+        },
+        "errors": ["calculation_agent_node returned None"],
+    }
+
+
+def product_lazy_node(state: AgentState) -> dict:
+    from agents.product_agent import product_agent_node
+    result = product_agent_node(state)
+    return result if result is not None else {
+        "product_result": {
+            "ok": False,
+            "error": "product_agent_node returned None",
+        },
+        "errors": ["product_agent_node returned None"],
+    }
+
+
+def recommend_lazy_node(state: AgentState) -> dict:
+    from agents.recommend_agent import recommend_agent_node
+    result = recommend_agent_node(state)
+    return result if result is not None else {
+        "recommendation_result": {
+            "ok": False,
+            "error": "recommend_agent_node returned None",
+        },
+        "errors": ["recommend_agent_node returned None"],
+    }
+
+
+def validation_lazy_node(state: AgentState) -> dict:
+    from agents.validation_agent import validation_agent_node
+    result = validation_agent_node(state)
+    return result if result is not None else {
+        "validation_result": {
+            "ok": False,
+            "error": "validation_agent_node returned None",
+        },
+        "errors": ["validation_agent_node returned None"],
+    }
+
+
+def supervisor_final_lazy_node(state: AgentState) -> dict:
+    from agents.supervisor_final import supervisor_final_node
+    result = supervisor_final_node(state)
+    return result if result is not None else {
+        "final_answer": "최종 답변 생성 중 오류가 발생했습니다.",
+        "errors": ["supervisor_final_node returned None"],
+    }
 
 
 def build_graph():
-    """
-    수정된 Supervisor 기반 그래프.
-
-    단순 상품 질문:
-    START → supervisor → product_agent → supervisor_final → END
-
-    단순 고객/계산 질문:
-    START → supervisor → analysis_agent → supervisor_final → END
-
-    복합 추천/갈아타기/중도해지 질문:
-    START → supervisor
-          → analysis_agent
-          → product_agent
-          → recommend_agent
-          → validation_agent
-          → supervisor_final
-          → END
-    """
     builder = StateGraph(AgentState)
 
-    # 노드 추가
-    builder.add_node("supervisor", supervisor_node)
-    builder.add_node("product_agent", product_agent_node)
-    builder.add_node("analysis_agent", analysis_agent_node)
-    builder.add_node("recommend_agent", recommend_agent_node)
-    builder.add_node("validation_agent", validation_agent_node)
-    builder.add_node("supervisor_final", supervisor_final_node)
+    builder.add_node("supervisor", supervisor_lazy_node)
+    builder.add_node("customer_agent", customer_lazy_node)
+    builder.add_node("calculation_agent", calculation_lazy_node)
+    builder.add_node("product_agent", product_lazy_node)
+    builder.add_node("recommend_agent", recommend_lazy_node)
+    builder.add_node("validation_agent", validation_lazy_node)
+    builder.add_node("supervisor_final", supervisor_final_lazy_node)
 
-    # START → supervisor
     builder.add_edge(START, "supervisor")
 
-    # supervisor → 첫 실행 Agent 또는 supervisor_final
     builder.add_conditional_edges(
         "supervisor",
         _supervisor_router,
         {
+            "customer_agent": "customer_agent",
+            "calculation_agent": "calculation_agent",
             "product_agent": "product_agent",
-            "analysis_agent": "analysis_agent",
             "recommend_agent": "recommend_agent",
+            "validation_agent": "validation_agent",
             "supervisor_final": "supervisor_final",
         },
     )
 
-    # analysis 이후
+    possible_next_nodes = {
+        "customer_agent": "customer_agent",
+        "calculation_agent": "calculation_agent",
+        "product_agent": "product_agent",
+        "recommend_agent": "recommend_agent",
+        "validation_agent": "validation_agent",
+        "supervisor_final": "supervisor_final",
+    }
+
     builder.add_conditional_edges(
-        "analysis_agent",
-        _after_analysis_router,
-        {
-            "product_agent": "product_agent",
-            "supervisor_final": "supervisor_final",
-        },
+        "customer_agent",
+        _route_after("customer_agent"),
+        possible_next_nodes,
     )
 
-    # product 이후
+    builder.add_conditional_edges(
+        "calculation_agent",
+        _route_after("calculation_agent"),
+        possible_next_nodes,
+    )
+
     builder.add_conditional_edges(
         "product_agent",
-        _after_product_router,
-        {
-            "recommend_agent": "recommend_agent",
-            "supervisor_final": "supervisor_final",
-        },
+        _route_after("product_agent"),
+        possible_next_nodes,
     )
 
-    # recommend 이후
     builder.add_conditional_edges(
         "recommend_agent",
-        _after_recommend_router,
-        {
-            "validation_agent": "validation_agent",
-        },
+        _route_after("recommend_agent"),
+        possible_next_nodes,
     )
 
-    # validation 이후 최종 답변 종합
-    builder.add_edge("validation_agent", "supervisor_final")
+    builder.add_conditional_edges(
+        "validation_agent",
+        _route_after("validation_agent"),
+        possible_next_nodes,
+    )
 
-    # 최종 종료
     builder.add_edge("supervisor_final", END)
 
-    graph = builder.compile()
-    return graph
+    return builder.compile()
