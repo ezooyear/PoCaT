@@ -1,47 +1,223 @@
 """
-Validation 에이전트 전용 도구
-LLM 기반 결과 검증
-"""
-from langchain_core.tools import tool
-from langchain_core.messages import SystemMessage, HumanMessage
-from config.settings import get_llm
-
-
-VERIFY_PROMPT = """당신은 금융 데이터 검증 전문가입니다.
-아래 결과를 검증하고 오류가 있으면 지적해주세요.
-
-## 검증 항목
-1. **계산 오류**: 이자, 만기 수령액, 세금 등의 수치가 정확한지
-2. **논리 오류**: 비교 분석의 논리가 타당한지
-3. **정보 오류**: 상품 정보, 고객 정보가 일관성 있는지
-4. **추천 오류**: 추천 상품이 고객 조건에 부합하는지
-5. **할루시네이션(Hallucination)**: DB 데이터나 RAG 약관 정보에 근거하지 않는 수치, 우대금리, 가상의 금융 상품을 지어냈는지 여부
-
-## 응답 형식
-- 오류가 없으면: "✅ 검증 완료: 오류 없음"
-- 오류가 있으면: "⚠️ 검증 결과:" 뒤에 구체적 오류 내용 및 할루시네이션 탐지 내용 기술
+Validation Agent 검증 도구
+- Agent 결과의 누락 여부, 공통 포맷, 실행 계획 완료 여부를 검증합니다.
+- 세부 검증은 팀원 Agent 결과 구조가 확정된 뒤 보강합니다.
 """
 
+"""
+[팀원 코드 공유 이전 버전의 Validation Agent 목표]
+1. state.py와 base.py 구조에 맞게 validation_result를 저장한다.
+2. 각 Agent 결과가 공통 포맷인지 확인한다.
+3. task_type에 따라 필요한 결과가 있는지 확인한다.
+4. plan에 포함된 Agent가 완료되었는지 확인한다.
+5. errors가 있으면 검증 실패로 기록한다.
+6. 추천 결과와 eligibility 결과가 있으면 가능한 범위에서만 가볍게 비교한다
 
-@tool
-def verify_result(result_text: str, verification_type: str = "일반") -> str:
-    """다른 에이전트가 생성한 결과를 검증합니다.
-    계산 오류, 논리 오류, 추천 오류 등을 탐지합니다.
 
-    Args:
-        result_text: 검증할 결과 텍스트
-        verification_type: 검증 유형 ("계산", "추천", "비교", "일반")
+[추가 예정 검증 항목]
+- 조건 충돌 검증
+- 금리/금액/납입 횟수 일치 검증
+- RAG 근거 검증
+- 부적절 추천 여부 검증
+"""
+
+from typing import Any
+
+from graph.state import AgentState
+
+
+REQUIRED_RESULT_KEYS = ["status", "result", "evidence", "error"]
+
+
+REQUIRED_RESULTS_BY_TASK = {
+    "customer_lookup": ["customer_result"],
+    "product_info": ["product_result"],
+    "financial_analysis": ["customer_result", "financial_result"],
+    "eligibility_check": ["customer_result", "product_result", "eligibility_result"],
+    "recommendation": [
+        "customer_result",
+        "product_result",
+        "eligibility_result",
+        "recommend_result",
+    ],
+    "switch_analysis": [
+        "customer_result",
+        "product_result",
+        "financial_result",
+    ],
+}
+
+
+def validate_common_result_format(state: AgentState) -> list[str]:
+    """Agent별 구조화 결과가 공통 포맷을 따르는지 검증합니다."""
+    issues = []
+
+    result_map = {
+        "customer_result": state.get("customer_result"),
+        "product_result": state.get("product_result"),
+        "financial_result": state.get("financial_result"),
+        "eligibility_result": state.get("eligibility_result"),
+        "recommend_result": state.get("recommend_result"),
+    }
+
+    for result_name, result_value in result_map.items():
+        if result_value is None:
+            continue
+
+        if not isinstance(result_value, dict):
+            issues.append(f"{result_name}가 dict 형식이 아닙니다.")
+            continue
+
+        missing_keys = [
+            key for key in REQUIRED_RESULT_KEYS
+            if key not in result_value
+        ]
+
+        if missing_keys:
+            issues.append(f"{result_name}에 필수 키가 없습니다: {missing_keys}")
+
+        if result_value.get("status") == "failed":
+            issues.append(
+                f"{result_name}의 status가 failed입니다. error={result_value.get('error')}"
+            )
+
+    return issues
+
+
+def validate_required_results_by_task(state: AgentState) -> list[str]:
+    """task_type에 따라 필요한 Agent 결과가 존재하는지 검증합니다."""
+    issues = []
+
+    task_type = state.get("task_type")
+    required_results = REQUIRED_RESULTS_BY_TASK.get(task_type, [])
+
+    for result_name in required_results:
+        if not state.get(result_name):
+            issues.append(
+                f"task_type='{task_type}'에 필요한 {result_name}가 없습니다."
+            )
+
+    return issues
+
+
+def validate_plan_completion(state: AgentState) -> list[str]:
+    """Supervisor가 세운 plan의 Agent들이 완료되었는지 검증합니다."""
+    issues = []
+
+    plan = state.get("plan") or []
+    completed_agents = state.get("completed_agents") or []
+
+    for agent_name in plan:
+        if agent_name in ["validation_agent", "FINISH", "END"]:
+            continue
+
+        if agent_name not in completed_agents:
+            issues.append(
+                f"plan에 포함된 {agent_name}가 completed_agents에 없습니다."
+            )
+
+    return issues
+
+
+def validate_recorded_errors(state: AgentState) -> list[str]:
+    """이전 Agent 실행 중 기록된 errors가 있는지 검증합니다."""
+    errors = state.get("errors") or []
+
+    if not errors:
+        return []
+
+    return [f"이전 Agent 실행 중 errors가 기록되어 있습니다: {errors}"]
+
+
+def validate_recommendation_consistency(state: AgentState) -> list[str]:
     """
-    llm = get_llm()
+    추천 결과와 가입 가능 여부 결과의 기본 일관성을 검증합니다.
 
-    messages = [
-        SystemMessage(content=VERIFY_PROMPT),
-        HumanMessage(content=f"[검증 유형: {verification_type}]\n\n{result_text}"),
-    ]
+    현재는 팀원 Agent 결과 구조가 확정되지 않았으므로,
+    recommend_result.result.recommended_products와
+    eligibility_result.result.eligible_products가 모두 list일 때만 검사합니다.
+    """
+    issues = []
 
-    response = llm.invoke(messages)
-    return response.content
+    recommend_result = state.get("recommend_result")
+    eligibility_result = state.get("eligibility_result")
+
+    if not recommend_result or not eligibility_result:
+        return issues
+
+    recommend_data = recommend_result.get("result", {})
+    eligibility_data = eligibility_result.get("result", {})
+
+    recommended_products = recommend_data.get("recommended_products")
+    eligible_products = eligibility_data.get("eligible_products")
+
+    if not isinstance(recommended_products, list):
+        return issues
+
+    if not isinstance(eligible_products, list):
+        return issues
+
+    recommended_names = extract_product_names(recommended_products)
+    eligible_names = extract_product_names(eligible_products)
+
+    for product_name in recommended_names:
+        if product_name not in eligible_names:
+            issues.append(
+                f"추천 상품 '{product_name}'이 eligible_products에 없습니다."
+            )
+
+    return issues
 
 
-# 이 에이전트에 바인딩될 도구 목록
-VALIDATION_TOOLS = [verify_result]
+def extract_product_names(products: list[Any]) -> list[str]:
+    """상품 리스트에서 상품명을 추출합니다."""
+    names = []
+
+    for product in products:
+        if isinstance(product, str):
+            names.append(product)
+
+        elif isinstance(product, dict):
+            name = (
+                product.get("product_name")
+                or product.get("name")
+                or product.get("상품명")
+            )
+
+            if name:
+                names.append(str(name))
+
+    return names
+
+
+def run_validation_checks(state: AgentState) -> tuple[list[str], dict[str, bool]]:
+    """Validation Agent에서 수행할 전체 검증을 실행합니다."""
+    issues = []
+
+    common_format_issues = validate_common_result_format(state)
+    required_result_issues = validate_required_results_by_task(state)
+    plan_completion_issues = validate_plan_completion(state)
+    recorded_error_issues = validate_recorded_errors(state)
+    recommendation_issues = validate_recommendation_consistency(state)
+
+    issues.extend(common_format_issues)
+    issues.extend(required_result_issues)
+    issues.extend(plan_completion_issues)
+    issues.extend(recorded_error_issues)
+    issues.extend(recommendation_issues)
+
+    checked_items = {
+        "common_format_checked": True,
+        "required_results_checked": True,
+        "plan_completion_checked": True,
+        "recorded_errors_checked": True,
+        "recommendation_consistency_checked": True,
+
+        # 팀원 Agent 결과 구조 확정 후 보강 예정
+        "condition_conflict_checked": False,
+        "rate_amount_payment_checked": False,
+        "rag_evidence_checked": False,
+        "inappropriate_recommendation_checked": False,
+    }
+
+    return issues, checked_items

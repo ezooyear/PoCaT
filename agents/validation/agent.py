@@ -1,29 +1,53 @@
 """
-Validation 에이전트 — 다른 에이전트 결과 검증
+Validation Agent
+- State에 저장된 Agent별 결과를 검증합니다.
 """
-from langchain_core.messages import SystemMessage
-from config.settings import get_llm
+
+from typing import Any
+
 from graph.state import AgentState
-from agents.base import run_agent_loop
-from agents.validation.prompts import VALIDATION_SYSTEM_PROMPT
-from agents.validation.tools import VALIDATION_TOOLS
+from agents.base import make_agent_result
+from agents.validation.tools import run_validation_checks
 
 
-def validation_agent_node(state: AgentState) -> dict:
-    # 이전 에이전트 결과를 검증 대상으로 주입
-    agent_outputs = state.get("agent_outputs") or {}
-    prev_results = ""
-    for name, output in agent_outputs.items():
-        prev_results += f"\n### {name} 결과\n{output}\n"
+def validation_agent_node(state: AgentState) -> dict[str, Any]:
+    """
+    Validation Agent 노드 함수
 
-    extra_prompt = ""
-    if prev_results:
-        extra_prompt = f"\n\n## 검증 대상 결과\n{prev_results}"
+    검증 항목:
+    1. Agent별 구조화 결과 공통 포맷 확인
+    2. task_type별 필수 결과 존재 여부 확인
+    3. plan에 포함된 Agent 실행 완료 여부 확인
+    4. errors 기록 여부 확인
+    5. 추천 결과와 가입 가능 여부 결과의 기본 일관성 확인
+    """
 
-    return run_agent_loop(
-        state=state,
-        system_prompt=VALIDATION_SYSTEM_PROMPT + extra_prompt,
-        tools=VALIDATION_TOOLS,
-        output_key="validation_agent",
-        max_iterations=2,
+    issues, checked_items = run_validation_checks(state)
+    is_valid = len(issues) == 0
+
+    validation_result = make_agent_result(
+        status="success" if is_valid else "failed",
+        result={
+            "is_valid": is_valid,
+            "issues": issues,
+            "revision_required": not is_valid,
+            "checked_items": checked_items,
+        },
+        evidence=[],
+        error=None if is_valid else "검증 이슈가 발견되었습니다.",
     )
+
+    agent_outputs = dict(state.get("agent_outputs") or {})
+    agent_outputs["validation_agent"] = validation_result
+
+    completed_agents = list(state.get("completed_agents") or [])
+    if "validation_agent" not in completed_agents:
+        completed_agents.append("validation_agent")
+
+    return {
+        "validation_result": validation_result,
+        "agent_outputs": agent_outputs,
+        "current_agent": "validation_agent",
+        "completed_agents": completed_agents,
+        "current_step": (state.get("current_step") or 0) + 1,
+    }
