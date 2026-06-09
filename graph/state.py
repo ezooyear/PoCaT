@@ -48,6 +48,7 @@ class AgentState(TypedDict, total=False):
     # 에이전트별 전체 출력 저장소
     agent_outputs: Optional[dict[str, Any]]
 
+
     # 5. Agent별 구조화 결과
     customer_result: Optional[dict[str, Any]]
     product_result: Optional[dict[str, Any]]
