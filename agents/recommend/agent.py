@@ -1,5 +1,6 @@
 """
-Recommend agent - rank only eligible products with no pending checks.
+Recommend Agent
+- 자격 판단이 끝난 상품 중 실제 추천 가능한 상품만 순위화합니다.
 """
 from langchain_core.messages import AIMessage
 
@@ -14,6 +15,7 @@ from graph.state import AgentState
 
 
 def recommend_agent_node(state: AgentState) -> dict:
+    # eligibility_results를 분류해 recommendation_results와 요약 문자열을 만듭니다.
     agent_outputs = dict(state.get("agent_outputs") or {})
 
     eligibility_results = state.get("eligibility_results") or []

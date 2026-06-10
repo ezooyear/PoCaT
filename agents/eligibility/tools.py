@@ -1,6 +1,6 @@
 """
-Eligibility agent tools.
-Use only customer/product outputs already gathered by other agents.
+Eligibility Agent 도구
+- 다른 Agent가 모아둔 고객/상품 정보를 비교해 자격 판단에 필요한 값을 만듭니다.
 """
 import json
 import re
@@ -10,6 +10,7 @@ from langchain_core.tools import tool
 
 
 def parse_customer_profile(raw_profile: Any) -> dict:
+    # 고객 관련 자유형 텍스트를 읽어 판단에 필요한 핵심 정보만 뽑습니다.
     if isinstance(raw_profile, dict):
         profile = dict(raw_profile)
         profile["raw_text"] = json.dumps(raw_profile, ensure_ascii=False)
@@ -41,6 +42,7 @@ def parse_customer_profile(raw_profile: Any) -> dict:
 
 
 def parse_customer_accounts(raw_accounts: Any) -> list[dict]:
+    # 고객 계좌/거래 텍스트를 단순 목록 형태로 정리합니다.
     if isinstance(raw_accounts, list):
         return raw_accounts
     text = str(raw_accounts or "")
@@ -50,6 +52,7 @@ def parse_customer_accounts(raw_accounts: Any) -> list[dict]:
 
 
 def extract_product_candidates(raw_products: Any) -> list[dict]:
+    # Product Agent가 넘긴 원문에서 상품 후보를 상품 단위로 나눕니다.
     if isinstance(raw_products, list):
         return [dict(item) for item in raw_products]
 
@@ -65,6 +68,7 @@ def extract_product_candidates(raw_products: Any) -> list[dict]:
 
 
 def _build_product_candidate(text: str) -> dict:
+    # 상품 설명 한 덩어리에서 가입 판단에 필요한 규칙성 정보만 뽑습니다.
     lowered = text.lower()
     product_name = _extract_product_name(text)
 
@@ -121,6 +125,7 @@ def _build_product_candidate(text: str) -> dict:
 
 
 def evaluate_product_eligibility(customer_profile: dict, customer_accounts: list[dict], product: dict) -> dict:
+    # 고객 정보와 상품 조건을 비교해 상품별 eligibility 결과를 만듭니다.
     reasons: list[str] = []
     check_required: list[str] = []
 
@@ -185,6 +190,7 @@ def evaluate_product_eligibility(customer_profile: dict, customer_accounts: list
 
 
 def evaluate_bonus_conditions(customer_profile: dict, customer_accounts: list[dict], product: dict) -> tuple[list[str], list[str]]:
+    # 우대조건 충족 여부를 충족/미충족 두 목록으로 나눕니다.
     account_text = " ".join(item.get("raw_text", "") for item in customer_accounts)
     merged = f"{customer_profile.get('raw_text', '')}\n{account_text}".lower()
 
@@ -203,6 +209,7 @@ def evaluate_bonus_conditions(customer_profile: dict, customer_accounts: list[di
 
 
 def build_eligibility_summary(results: list[dict]) -> str:
+    # 구조화 결과를 사람이 읽기 쉬운 요약 문자열로 바꿉니다.
     if not results:
         return "가입 가능 여부를 판단할 상품 정보가 없어 자격 결과를 만들지 못했습니다."
 
@@ -222,6 +229,7 @@ def build_eligibility_summary(results: list[dict]) -> str:
 
 
 def _split_product_chunks(text: str) -> list[str]:
+    # 긴 상품 원문을 상품별 블록으로 최대한 안정적으로 나눕니다.
     dashed_chunks = [chunk.strip() for chunk in re.split(r"\n\s*---+\s*\n", text) if chunk.strip()]
     if len(dashed_chunks) > 1:
         return dashed_chunks
@@ -242,6 +250,7 @@ def _split_product_chunks(text: str) -> list[str]:
 
 
 def _extract_product_name(text: str) -> str:
+    # 상품 블록 안에서 실제 상품명처럼 보이는 줄을 우선 선택합니다.
     for line in text.splitlines():
         stripped = line.strip().lstrip("#").strip()
         stripped = re.sub(r"^[-*]\s+", "", stripped)
@@ -323,7 +332,7 @@ def _dedupe(items: list[str]) -> list[str]:
 
 @tool
 def evaluate_eligibility(customer_profile: str, product_info: str) -> str:
-    """Compare the given customer and product information and return structured eligibility."""
+    """고객 정보와 상품 정보를 비교해 구조화된 가입 가능 여부를 반환합니다."""
     profile = parse_customer_profile(customer_profile)
     product = _build_product_candidate(product_info)
     result = evaluate_product_eligibility(profile, [], product)
@@ -332,7 +341,7 @@ def evaluate_eligibility(customer_profile: str, product_info: str) -> str:
 
 @tool
 def evaluate_bonus_rate(customer_profile: str, customer_accounts: str = "") -> str:
-    """Evaluate bonus-condition status from the given customer/account text."""
+    """고객 정보와 계좌 정보를 바탕으로 우대조건 충족 여부를 반환합니다."""
     profile = parse_customer_profile(customer_profile)
     accounts = parse_customer_accounts(customer_accounts)
     product = {"bonus_keywords": ["급여이체", "자동이체", "카드사용", "주거래", "마케팅동의"]}
@@ -345,7 +354,7 @@ def evaluate_bonus_rate(customer_profile: str, customer_accounts: str = "") -> s
 
 @tool
 def filter_eligible_products(customer_profile: str, products_info: str) -> str:
-    """Filter only eligible products from the provided product text."""
+    """전체 상품 중 가입 가능한 상품만 골라 반환합니다."""
     profile = parse_customer_profile(customer_profile)
     products = extract_product_candidates(products_info)
     results = [evaluate_product_eligibility(profile, [], product) for product in products]

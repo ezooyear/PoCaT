@@ -1,5 +1,6 @@
 """
-Eligibility agent prompt.
+Eligibility Agent 프롬프트
+- 어떤 기준으로 자격 판단을 해야 하는지 정의합니다.
 """
 
 ELIGIBILITY_SYSTEM_PROMPT = """당신은 국민은행(KB) 예적금 가입 자격 판단 및 우대조건 분석 전문가입니다.

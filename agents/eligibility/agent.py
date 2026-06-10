@@ -1,5 +1,6 @@
 """
-Eligibility agent - build structured eligibility results from customer/product outputs.
+Eligibility Agent
+- Customer/Product 결과를 받아 상품별 가입 가능 여부를 구조화합니다.
 """
 from langchain_core.messages import AIMessage
 
@@ -15,6 +16,7 @@ from graph.state import AgentState
 
 
 def eligibility_agent_node(state: AgentState) -> dict:
+    # 고객 정보와 상품 정보를 이어 받아 eligibility_results를 만드는 진입 함수입니다.
     agent_outputs = dict(state.get("agent_outputs") or {})
 
     customer_profile_raw = state.get("customer_profile")

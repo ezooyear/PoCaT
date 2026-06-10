@@ -1,5 +1,6 @@
 """
-Recommend agent prompt.
+Recommend Agent 프롬프트
+- 추천 시 지켜야 할 입력 기준과 금지 사항을 정의합니다.
 """
 
 RECOMMEND_SYSTEM_PROMPT = """당신은 국민은행(KB) 예적금 추천 전문가입니다.

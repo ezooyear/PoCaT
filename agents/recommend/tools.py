@@ -1,6 +1,6 @@
 """
-Recommend agent tools.
-Only recommend eligible products with no pending checks.
+Recommend Agent 도구
+- 추천 가능한 상품만 골라 점수를 매기고 요약 표를 만듭니다.
 """
 import json
 import re
@@ -10,6 +10,7 @@ from langchain_core.tools import tool
 
 
 def parse_financial_results(raw_financial: Any) -> list[dict]:
+    # Financial Agent의 텍스트 결과를 상품별 계산 정보 목록으로 정리합니다.
     if isinstance(raw_financial, list):
         return raw_financial
 
@@ -45,6 +46,7 @@ def parse_financial_results(raw_financial: Any) -> list[dict]:
 
 
 def classify_eligibility_results(eligibility_results: list[dict]) -> dict:
+    # eligibility 결과를 추천 가능/추가 확인 필요/제외 대상으로 나눕니다.
     recommendable = []
     needs_check = []
     rejected = []
@@ -68,6 +70,7 @@ def build_recommendations(
     eligibility_results: list[dict],
     financial_results: list[dict] | None = None,
 ) -> list[dict]:
+    # 추천 가능한 상품만 점수화해 recommendation_results 형태로 만듭니다.
     financial_map = {
         _normalize_name(item.get("product_name", "")): item for item in (financial_results or [])
     }
@@ -127,6 +130,7 @@ def build_recommendation_summary(
     needs_check: list[dict],
     rejected: list[dict],
 ) -> str:
+    # 추천 표와 별도 안내 섹션을 합쳐 최종 요약 문자열을 만듭니다.
     lines = [
         "| 순위 | 상품명 | 점수 | 예상 이자 | 추천 이유 |",
         "|---:|---|---:|---:|---|",
@@ -168,6 +172,7 @@ def build_recommendation_summary(
 
 
 def _build_reason(eligibility_item: dict, financial: dict) -> str:
+    # 추천 이유를 짧은 설명 문장으로 합칩니다.
     parts = []
     met = eligibility_item.get("bonus_conditions_met", [])
     missing = eligibility_item.get("bonus_conditions_missing", [])
@@ -229,7 +234,7 @@ def rank_products(
     eligibility_results: str = "",
     financial_results: str = "",
 ) -> str:
-    """Rank only recommendable products and reflect financial results when available."""
+    """추천 가능한 상품만 순위화하고 계산 결과가 있으면 함께 반영합니다."""
     try:
         eligible_items = json.loads(eligibility_results) if eligibility_results else []
     except json.JSONDecodeError:
