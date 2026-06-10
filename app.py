@@ -8,8 +8,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from graph.builder import build_graph
-from db.postgres_db import test_connection
-from db.vectorstore import get_vectorstore
 
 
 # ─── 페이지 설정 ───
