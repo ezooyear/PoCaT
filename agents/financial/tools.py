@@ -1,100 +1,343 @@
 """
 Financial 에이전트 전용 도구
 이자 계산, 상품 비교 연산, 갈아타기 시뮬레이션 분석
-※ 고객 DB 및 상품 DB에 직접 접근하지 않습니다. (get_product_info, nl2sql_query 제거)
-※ 오직 Customer Agent가 제공한 고객/계좌 정보와 Product Agent가 RAG로 수집해 준 상품 정보를 인자로 받아 연산/시뮬레이션만 수행합니다.
+
+※ 고객 DB 및 상품 DB에 직접 접근하지 않습니다.
+※ Customer Agent가 제공한 고객/계좌 정보와 Product Agent가 제공한 상품 정보를 인자로 받아
+   계산/비교/시뮬레이션만 수행합니다.
 """
+
 from langchain_core.tools import tool
+
+
+DEFAULT_TAX_RATE = 0.154
+
+
+def _format_money(value: float) -> str:
+    return f"{value:,.0f}원"
+
+
+def _format_rate(value: float) -> str:
+    return f"{value:.2f}%"
+
+
+def _calculate_deposit_interest(
+    principal: float,
+    annual_rate: float,
+    months: int,
+    interest_type: str,
+    tax_rate: float,
+) -> dict:
+    rate = annual_rate / 100
+    years = months / 12
+
+    if interest_type == "복리":
+        before_tax_interest = principal * ((1 + rate / 12) ** months - 1)
+    else:
+        before_tax_interest = principal * rate * years
+
+    tax = before_tax_interest * tax_rate
+    after_tax_interest = before_tax_interest - tax
+    maturity_amount = principal + after_tax_interest
+
+    return {
+        "principal": principal,
+        "before_tax_interest": before_tax_interest,
+        "tax": tax,
+        "after_tax_interest": after_tax_interest,
+        "maturity_amount": maturity_amount,
+    }
+
+
+def _calculate_savings_interest(
+    monthly_payment: float,
+    annual_rate: float,
+    months: int,
+    tax_rate: float,
+) -> dict:
+    rate = annual_rate / 100
+    total_payment = monthly_payment * months
+
+    before_tax_interest = sum(
+        monthly_payment * rate * (months - payment_index) / 12
+        for payment_index in range(months)
+    )
+
+    tax = before_tax_interest * tax_rate
+    after_tax_interest = before_tax_interest - tax
+    maturity_amount = total_payment + after_tax_interest
+
+    return {
+        "total_payment": total_payment,
+        "before_tax_interest": before_tax_interest,
+        "tax": tax,
+        "after_tax_interest": after_tax_interest,
+        "maturity_amount": maturity_amount,
+    }
 
 
 @tool
 def calculate_interest(
-    principal: float, annual_rate: float, months: int,
-    interest_type: str = "단리", monthly_payment: float = 0,
+    principal: float,
+    annual_rate: float,
+    months: int,
+    interest_type: str = "단리",
+    monthly_payment: float = 0,
+    tax_rate: float = DEFAULT_TAX_RATE,
 ) -> str:
-    """예적금 이자를 계산합니다. 정기예금(단리/복리)과 적금(단리) 모두 계산 가능합니다.
+    """예금 또는 적금의 예상 이자와 만기 수령액을 계산합니다.
 
     Args:
-        principal: 예치 원금 (정기예금일 때 사용, 적금이면 0)
-        annual_rate: 연이율 (%, 예: 3.5)
-        months: 가입 기간 (개월)
-        interest_type: "단리" 또는 "복리" (기본값: 단리)
-        monthly_payment: 월 납입액 (적금일 때 사용, 예금이면 0)
+        principal: 예치 원금. 정기예금일 때 사용합니다.
+        annual_rate: 연이율. 예: 3.5
+        months: 가입 기간. 개월 단위입니다.
+        interest_type: "단리" 또는 "복리". 기본값은 "단리"입니다.
+        monthly_payment: 월 납입액. 적금일 때 사용합니다.
+        tax_rate: 이자소득 원천징수세율. 기본값은 0.154입니다.
     """
-    rate = annual_rate / 100
+    if annual_rate < 0:
+        return "연이율은 0 이상이어야 합니다."
+
+    if months <= 0:
+        return "가입 기간은 1개월 이상이어야 합니다."
+
+    if tax_rate < 0 or tax_rate >= 1:
+        return "세율은 0 이상 1 미만의 소수로 입력해야 합니다. 예: 0.154"
 
     if monthly_payment > 0:
-        total_payment = monthly_payment * months
-        total_interest = sum(
-            monthly_payment * rate * (months - i) / 12 for i in range(months)
+        result = _calculate_savings_interest(
+            monthly_payment=monthly_payment,
+            annual_rate=annual_rate,
+            months=months,
+            tax_rate=tax_rate,
         )
-        tax = total_interest * 0.154
-        after_tax = total_interest - tax
+
         return (
-            f"━━━ 적금 이자 계산 결과 ━━━\n"
-            f"월 납입액: {monthly_payment:,.0f}원\n연이율: {annual_rate}%\n"
-            f"가입기간: {months}개월\n총 납입액: {total_payment:,.0f}원\n"
-            f"세전 이자: {total_interest:,.0f}원\n이자소득세(15.4%): {tax:,.0f}원\n"
-            f"세후 이자: {after_tax:,.0f}원\n만기 수령액: {total_payment + after_tax:,.0f}원"
+            "적금 이자 계산 결과\n\n"
+            "계산 기준\n"
+            f"- 월 납입액: {_format_money(monthly_payment)}\n"
+            f"- 연 이율: {_format_rate(annual_rate)}\n"
+            f"- 가입 기간: {months}개월\n"
+            f"- 적용 세율: {_format_rate(tax_rate * 100)}\n\n"
+            "계산 과정\n"
+            f"1. 총 납입액 = {_format_money(monthly_payment)} x {months}개월 = {_format_money(result['total_payment'])}\n"
+            f"2. 세전 이자 = 월 납입액별 예치 기간을 반영하여 {_format_money(result['before_tax_interest'])}\n"
+            f"3. 세금 = {_format_money(result['before_tax_interest'])} x {_format_rate(tax_rate * 100)} = {_format_money(result['tax'])}\n"
+            f"4. 세후 이자 = {_format_money(result['before_tax_interest'])} - {_format_money(result['tax'])} = {_format_money(result['after_tax_interest'])}\n"
+            f"5. 만기 예상 수령액 = {_format_money(result['total_payment'])} + {_format_money(result['after_tax_interest'])} = {_format_money(result['maturity_amount'])}\n\n"
+            "결과\n"
+            f"- 총 납입액: {_format_money(result['total_payment'])}\n"
+            f"- 세전 이자: {_format_money(result['before_tax_interest'])}\n"
+            f"- 세금: {_format_money(result['tax'])}\n"
+            f"- 세후 이자: {_format_money(result['after_tax_interest'])}\n"
+            f"- 만기 예상 수령액: {_format_money(result['maturity_amount'])}"
+        )
+
+    if principal <= 0:
+        return "정기예금 계산 시 예치 원금은 0원보다 커야 합니다."
+
+    if interest_type not in ["단리", "복리"]:
+        return 'interest_type은 "단리" 또는 "복리"만 사용할 수 있습니다.'
+
+    result = _calculate_deposit_interest(
+        principal=principal,
+        annual_rate=annual_rate,
+        months=months,
+        interest_type=interest_type,
+        tax_rate=tax_rate,
+    )
+
+    if interest_type == "복리":
+        interest_formula = (
+            f"세전 이자 = {_format_money(principal)}에 월 복리 이율을 {months}개월 적용한 금액 "
+            f"- 원금 = {_format_money(result['before_tax_interest'])}"
         )
     else:
-        years = months / 12
-        if interest_type == "복리":
-            total_interest = principal * (1 + rate / 12) ** months - principal
-        else:
-            total_interest = principal * rate * years
-        tax = total_interest * 0.154
-        after_tax = total_interest - tax
-        return (
-            f"━━━ 정기예금 이자 계산 결과 ({interest_type}) ━━━\n"
-            f"예치금액: {principal:,.0f}원\n연이율: {annual_rate}%\n"
-            f"가입기간: {months}개월\n세전 이자: {total_interest:,.0f}원\n"
-            f"이자소득세(15.4%): {tax:,.0f}원\n세후 이자: {after_tax:,.0f}원\n"
-            f"만기 수령액: {principal + after_tax:,.0f}원"
+        interest_formula = (
+            f"세전 이자 = {_format_money(principal)} x {_format_rate(annual_rate)} "
+            f"x {months}개월 / 12 = {_format_money(result['before_tax_interest'])}"
         )
+
+    return (
+        f"정기예금 이자 계산 결과 ({interest_type})\n\n"
+        "계산 기준\n"
+        f"- 예치 원금: {_format_money(principal)}\n"
+        f"- 연 이율: {_format_rate(annual_rate)}\n"
+        f"- 예치 기간: {months}개월\n"
+        f"- 이자 방식: {interest_type}\n"
+        f"- 적용 세율: {_format_rate(tax_rate * 100)}\n\n"
+        "계산 과정\n"
+        f"1. {interest_formula}\n"
+        f"2. 세금 = {_format_money(result['before_tax_interest'])} x {_format_rate(tax_rate * 100)} = {_format_money(result['tax'])}\n"
+        f"3. 세후 이자 = {_format_money(result['before_tax_interest'])} - {_format_money(result['tax'])} = {_format_money(result['after_tax_interest'])}\n"
+        f"4. 만기 예상 수령액 = {_format_money(principal)} + {_format_money(result['after_tax_interest'])} = {_format_money(result['maturity_amount'])}\n\n"
+        "결과\n"
+        f"- 세전 이자: {_format_money(result['before_tax_interest'])}\n"
+        f"- 세금: {_format_money(result['tax'])}\n"
+        f"- 세후 이자: {_format_money(result['after_tax_interest'])}\n"
+        f"- 만기 예상 수령액: {_format_money(result['maturity_amount'])}"
+    )
 
 
 @tool
 def compare_products(products_info: str) -> str:
-    """여러 상품들의 금리, 가입 조건, 우대 조건 등을 서로 대조하여 일대일 비교 분석합니다.
+    """Product Agent가 제공한 여러 상품 정보를 비교 분석합니다.
 
     Args:
-        products_info: Product Agent가 RAG를 통해 수집해 준 대상 상품들의 상세 요건 정보 (금리, 한도 등)
+        products_info: Product Agent가 수집한 상품 정보 문자열.
     """
-    lines = [
-        "━━━ 금융 상품 정보 비교 분석 연산 ━━━\n",
-        "【전달받은 비교 대상 상품 정보】", products_info, "",
-        "━━━ 비교 분석 요점 ━━━",
-        "• 기본 금리와 최고 우대 금리의 차이 대조",
-        "• 가입 한도(금액) 및 의무 가입 기간 비교",
-        "• 각 상품의 우대 혜택 적용을 위한 장단점 나열",
-    ]
-    return "\n".join(lines)
+    if not products_info or not products_info.strip():
+        return (
+            "상품 비교를 수행할 수 없습니다.\n"
+            "비교 대상 상품 정보가 필요합니다."
+        )
+
+    return (
+        "금융 상품 비교 분석\n\n"
+        "전달받은 상품 정보\n"
+        f"{products_info}\n\n"
+        "비교 관점\n"
+        "- 기본 금리와 최고 우대 금리 차이를 비교합니다.\n"
+        "- 가입 기간과 만기 조건을 비교합니다.\n"
+        "- 월 납입 한도 또는 예치 한도를 비교합니다.\n"
+        "- 우대금리 조건 충족 가능성을 비교합니다.\n"
+        "- 중도해지 조건과 유의사항을 비교합니다.\n\n"
+        "위 비교는 Product Agent가 제공한 상품 정보 범위 안에서만 수행됩니다."
+    )
 
 
 @tool
-def compare_switch_benefit(new_product_info: str, customer_accounts: str = "") -> str:
-    """신규 상품의 조건과 고객의 기존 가입 계좌 현황을 비교하여 중도해지 vs 갈아타기의 유불리를 시뮬레이션합니다.
+def compare_switch_benefit(
+    current_balance: float,
+    current_rate: float,
+    remaining_months: int,
+    new_rate: float,
+    new_months: int,
+    early_termination_rate: float = 0,
+    monthly_payment: float = 0,
+    tax_rate: float = DEFAULT_TAX_RATE,
+    new_product_info: str = "",
+    customer_accounts: str = "",
+) -> str:
+    """기존 상품 유지와 신규 상품 가입의 갈아타기 유불리를 계산합니다.
 
     Args:
-        new_product_info: Product Agent가 RAG를 통해 수집해 준 신규 가입 후보 상품의 상세 정보 (금리, 가입 조건 등)
-        customer_accounts: Customer Agent가 조회해 준 고객의 기존 예적금 계좌 목록 및 상태 정보
+        current_balance: 기존 계좌 현재 잔액.
+        current_rate: 기존 상품 연이율.
+        remaining_months: 기존 상품 만기까지 남은 개월 수.
+        new_rate: 신규 상품 연이율.
+        new_months: 신규 상품 가입 기간.
+        early_termination_rate: 기존 상품 중도해지 연이율.
+        monthly_payment: 적금형 비교 시 월 납입액. 예금형 비교면 0입니다.
+        tax_rate: 이자소득 원천징수세율. 기본값은 0.154입니다.
+        new_product_info: Product Agent가 제공한 신규 상품 정보.
+        customer_accounts: Customer Agent가 제공한 기존 계좌 정보.
     """
+    if current_balance <= 0:
+        return "갈아타기 비교를 위해 기존 계좌 잔액이 필요합니다."
+
+    if current_rate < 0 or new_rate < 0 or early_termination_rate < 0:
+        return "금리는 0 이상이어야 합니다."
+
+    if remaining_months <= 0 or new_months <= 0:
+        return "비교 기간은 1개월 이상이어야 합니다."
+
+    if tax_rate < 0 or tax_rate >= 1:
+        return "세율은 0 이상 1 미만의 소수로 입력해야 합니다. 예: 0.154"
+
+    keep_result = _calculate_deposit_interest(
+        principal=current_balance,
+        annual_rate=current_rate,
+        months=remaining_months,
+        interest_type="단리",
+        tax_rate=tax_rate,
+    )
+
+    if early_termination_rate > 0:
+        early_result = _calculate_deposit_interest(
+            principal=current_balance,
+            annual_rate=early_termination_rate,
+            months=remaining_months,
+            interest_type="단리",
+            tax_rate=tax_rate,
+        )
+        early_amount = early_result["maturity_amount"]
+        early_loss = keep_result["maturity_amount"] - early_amount
+    else:
+        early_amount = current_balance
+        early_loss = keep_result["maturity_amount"] - current_balance
+
+    if monthly_payment > 0:
+        new_result = _calculate_savings_interest(
+            monthly_payment=monthly_payment,
+            annual_rate=new_rate,
+            months=new_months,
+            tax_rate=tax_rate,
+        )
+        new_maturity_amount = new_result["maturity_amount"]
+        new_principal = new_result["total_payment"]
+    else:
+        new_result = _calculate_deposit_interest(
+            principal=early_amount,
+            annual_rate=new_rate,
+            months=new_months,
+            interest_type="단리",
+            tax_rate=tax_rate,
+        )
+        new_maturity_amount = new_result["maturity_amount"]
+        new_principal = early_amount
+
+    difference = new_maturity_amount - keep_result["maturity_amount"]
+
+    if difference > 0:
+        summary = f"금액 기준으로 신규 상품 가입 시 {_format_money(difference)} 더 높게 계산됩니다."
+    elif difference < 0:
+        summary = f"금액 기준으로 기존 상품 유지 시 {_format_money(abs(difference))} 더 높게 계산됩니다."
+    else:
+        summary = "금액 기준으로 기존 유지와 신규 가입의 예상 수령액이 동일하게 계산됩니다."
+
     lines = [
-        "━━━ 갈아타기 유불리 시뮬레이션 분석 ━━━\n",
-        "【전달받은 신규 후보 상품 정보】", new_product_info, "",
+        "갈아타기 유불리 시뮬레이션",
+        "",
+        "기존 상품 유지 시",
+        f"- 현재 잔액: {_format_money(current_balance)}",
+        f"- 기존 연이율: {_format_rate(current_rate)}",
+        f"- 남은 기간: {remaining_months}개월",
+        f"- 적용 세율: {_format_rate(tax_rate * 100)}",
+        f"- 만기 예상 수령액: {_format_money(keep_result['maturity_amount'])}",
+        "",
+        "중도해지 후 신규 상품 가입 시",
+        f"- 중도해지 적용 연이율: {_format_rate(early_termination_rate)}",
+        f"- 중도해지 예상 수령액: {_format_money(early_amount)}",
+        f"- 중도해지로 인한 예상 손실: {_format_money(early_loss)}",
+        f"- 신규 상품 연이율: {_format_rate(new_rate)}",
+        f"- 신규 상품 가입 기간: {new_months}개월",
+        f"- 신규 계산 원금 또는 총 납입액: {_format_money(new_principal)}",
+        f"- 신규 상품 만기 예상 수령액: {_format_money(new_maturity_amount)}",
+        "",
+        "비교 결과",
+        f"- 기존 유지 예상 수령액: {_format_money(keep_result['maturity_amount'])}",
+        f"- 갈아타기 예상 수령액: {_format_money(new_maturity_amount)}",
+        f"- 차이: {_format_money(difference)}",
+        f"- 결론: {summary}",
     ]
+
     if customer_accounts:
-        lines.extend(["【전달받은 기존 가입 계좌 현황】", customer_accounts, ""])
+        lines.extend(["", "참고한 기존 계좌 정보", customer_accounts])
+
+    if new_product_info:
+        lines.extend(["", "참고한 신규 상품 정보", new_product_info])
 
     lines.extend([
-        "━━━ 갈아타기 유불리 판단 기준 ━━━",
-        "• 남은 만기일이 3개월 이내라면 기존 계좌를 유지하는 것이 일반적으로 유리",
-        "• 신규 상품의 최고 우대금리가 기존 금리보다 최소 1.0%p 이상 높아야 갈아타기 메리트 발생",
-        "• 기존 상품 중도해지 시 중도해지이율(기본금리의 40~60% 감면 등)로 인한 이자 손실액 비교 판단",
+        "",
+        "실제 적용 금리, 세금, 우대 조건, 중도해지 기준에 따라 결과가 달라질 수 있습니다.",
     ])
+
     return "\n".join(lines)
 
 
-# 이 에이전트에 바인딩될 도구 목록
-FINANCIAL_TOOLS = [calculate_interest, compare_products, compare_switch_benefit]
+FINANCIAL_TOOLS = [
+    calculate_interest,
+    compare_products,
+    compare_switch_benefit,
+]

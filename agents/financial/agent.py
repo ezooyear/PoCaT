@@ -1,6 +1,7 @@
 """
-Financial 에이전트 — 이자 계산, 만기, 납입, 중도해지, 비교, 갈아타기
+Financial 에이전트 - 이자 계산, 만기, 납입, 중도해지, 비교, 갈아타기
 """
+
 from graph.state import AgentState
 from agents.base import run_agent_loop
 from agents.financial.prompts import FINANCIAL_SYSTEM_PROMPT
