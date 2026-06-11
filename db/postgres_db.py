@@ -30,28 +30,7 @@ DANGEROUS_KEYWORDS = [
 DB_SCHEMA = """
 ## PostgreSQL 데이터베이스 스키마
 
-### 1. products (상품 정보)
-| 컬럼 | 타입 | 설명 |
-|---|---|---|
-| product_id | INT (PK) | 상품 고유 ID |
-| product_name | VARCHAR(100) | 상품명 (예: KB Star 정기예금). ※ 주의: 군인/군 간부 관련 상품은 이름에 '장병', '군인', '간부' 등의 키워드가 포함될 수 있습니다. |
-| product_type | VARCHAR(20) | 상품 유형 (예금/적금) |
-| join_channel | VARCHAR(200) | 가입 채널 |
-| min_amount | BIGINT | 최소 가입 금액 |
-| max_amount | BIGINT | 최대 가입 금액 |
-| min_period_months | INT | 최소 가입 기간(개월) |
-| max_period_months | INT | 최대 가입 기간(개월) |
-| partial_withdrawal_yn | BOOLEAN | 부분 인출 가능 여부 |
-| auto_redeposit_yn | BOOLEAN | 자동 재예치 가능 여부 |
-| additional_deposit_yn | BOOLEAN | 추가 입금 가능 여부 |
-| is_active | BOOLEAN | 현재 판매 중 여부 |
-| base_rate | NUMERIC(5,2) | 기본 금리(%) |
-| max_rate | NUMERIC(5,2) | 최대 금리(%) |
-| age_min | INT | 최소 가입 나이 |
-| age_max | INT | 최대 가입 나이 |
-| rag_document_key | VARCHAR(100) | RAG 문서 키 |
-
-### 2. customers (고객 정보)
+### 1. customers (고객 정보)
 | 컬럼 | 타입 | 설명 |
 |---|---|---|
 | customer_id | INT (PK) | 고객 고유 ID |
