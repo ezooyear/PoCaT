@@ -1,25 +1,45 @@
 """
-Recommend 에이전트 — 목적별/조건별 추천
+Recommend Agent
+- 자격 판단이 끝난 상품 중 실제 추천 가능한 상품만 순위화합니다.
 """
-from graph.state import AgentState
-from agents.base import run_agent_loop
+from langchain_core.messages import AIMessage
+
 from agents.recommend.prompts import RECOMMEND_SYSTEM_PROMPT
-from agents.recommend.tools import RECOMMEND_TOOLS
+from agents.recommend.tools import (
+    build_recommendation_summary,
+    build_recommendations,
+    classify_eligibility_results,
+    parse_financial_results,
+)
+from graph.state import AgentState
 
 
 def recommend_agent_node(state: AgentState) -> dict:
-    return run_agent_loop(
-        state=state,
-        system_prompt=RECOMMEND_SYSTEM_PROMPT,
-        tools=RECOMMEND_TOOLS,
-        output_key="recommend_agent",
-        max_iterations=3,
-        prev_context_intro="이전 단계에서 확인된 정보 (이 정보를 바탕으로 추천하세요)",
-        prev_context_labels={
-            "customer_agent": "고객 정보 조회 결과",
-            "eligibility_agent": "고객 자격/조건 분석 결과",
-            "product_agent": "상품 정보",
-            "financial_agent": "계산/분석 결과",
-        },
-        prev_context_suffix="※ 위 분석 결과를 참고하여 구체적 근거와 함께 추천하세요.",
+    # eligibility_results를 분류해 recommendation_results와 요약 문자열을 만듭니다.
+    agent_outputs = dict(state.get("agent_outputs") or {})
+
+    eligibility_results = state.get("eligibility_results") or []
+    financial_results = state.get("financial_results")
+    if financial_results is None:
+        financial_results = parse_financial_results(agent_outputs.get("financial_agent", ""))
+
+    classified = classify_eligibility_results(eligibility_results)
+    recommendations = build_recommendations(classified["recommendable"], financial_results)
+    summary = build_recommendation_summary(
+        recommendations,
+        classified["needs_check"],
+        classified["rejected"],
     )
+    agent_outputs["recommend_agent"] = summary
+
+    return {
+        "messages": [AIMessage(content=summary)],
+        "agent_outputs": agent_outputs,
+        "current_step": (state.get("current_step") or 0) + 1,
+        "financial_results": financial_results,
+        "recommendation_results": recommendations,
+        "context": {
+            **(state.get("context") or {}),
+            "recommend_prompt": RECOMMEND_SYSTEM_PROMPT,
+        },
+    }
