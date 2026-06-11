@@ -50,6 +50,28 @@ def eligibility_agent_node(state: AgentState) -> dict:
         "customer_accounts": customer_accounts,
         "product_candidates": product_candidates,
         "eligibility_results": results,
+
+
+        ## 추가 : validation에서 활용
+         "eligibility_result": {
+            "summary": summary,
+            "results": results,
+            "result_count": len(results),
+            "recommendable_count": len([
+                item for item in results
+                if item.get("eligible") is True and not item.get("check_required")
+            ]),
+            "needs_check_count": len([
+                item for item in results
+                if item.get("eligible") is True and item.get("check_required")
+            ]),
+            "rejected_count": len([
+                item for item in results
+                if item.get("eligible") is not True
+            ]),
+        },
+
+        
         "context": {
             **(state.get("context") or {}),
             "eligibility_prompt": ELIGIBILITY_SYSTEM_PROMPT,

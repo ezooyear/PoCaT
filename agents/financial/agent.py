@@ -14,6 +14,6 @@ def financial_agent_node(state: AgentState) -> dict:
         system_prompt=FINANCIAL_SYSTEM_PROMPT,
         tools=FINANCIAL_TOOLS,
         output_key="financial_agent",
-        result_key="financial_result",
+        result_key="financial_result", # 추가 : validation에서 활용
         max_iterations=5,
     )

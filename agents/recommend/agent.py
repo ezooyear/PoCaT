@@ -19,9 +19,22 @@ def recommend_agent_node(state: AgentState) -> dict:
     agent_outputs = dict(state.get("agent_outputs") or {})
 
     eligibility_results = state.get("eligibility_results") or []
+
+    ## 추가 : validation에서 활용
+    if not eligibility_results:
+        eligibility_result = state.get("eligibility_result") or {}
+        if isinstance(eligibility_result, dict):
+            eligibility_results = eligibility_result.get("results") or []
+
     financial_results = state.get("financial_results")
+
+    ## 추가 : validation에서 활용
     if financial_results is None:
-        financial_results = parse_financial_results(agent_outputs.get("financial_agent", ""))
+        financial_result = state.get("financial_result")
+        if financial_result:
+            financial_results = financial_result
+        else:
+            financial_results = parse_financial_results(agent_outputs.get("financial_agent", ""))
 
     classified = classify_eligibility_results(eligibility_results)
     recommendations = build_recommendations(classified["recommendable"], financial_results)
@@ -38,6 +51,16 @@ def recommend_agent_node(state: AgentState) -> dict:
         "current_step": (state.get("current_step") or 0) + 1,
         "financial_results": financial_results,
         "recommendation_results": recommendations,
+
+        ## 추가 : validation에서 활용
+        "recommend_result": {
+            "summary": summary,
+            "recommendations": recommendations,
+            "recommendation_count": len(recommendations),
+            "needs_check": classified.get("needs_check", []),
+            "rejected": classified.get("rejected", []),
+        },
+
         "context": {
             **(state.get("context") or {}),
             "recommend_prompt": RECOMMEND_SYSTEM_PROMPT,

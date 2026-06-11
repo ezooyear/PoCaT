@@ -20,6 +20,6 @@ def customer_agent_node(state: AgentState) -> dict:
         system_prompt=CUSTOMER_SYSTEM_PROMPT,
         tools=CUSTOMER_TOOLS,
         output_key="customer_agent",
-        result_key="customer_result",
+        result_key="customer_result", # 추가 : validation에서 활용
         max_iterations=3,
     )

@@ -13,6 +13,6 @@ def product_agent_node(state: AgentState) -> dict:
         system_prompt=PRODUCT_SYSTEM_PROMPT,
         tools=PRODUCT_TOOLS,
         output_key="product_agent",
-        result_key="product_result",
+        result_key="product_result", # 추가 : validation에서 활용
         max_iterations=3,
     )
