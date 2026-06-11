@@ -14,5 +14,6 @@ def financial_agent_node(state: AgentState) -> dict:
         system_prompt=FINANCIAL_SYSTEM_PROMPT,
         tools=FINANCIAL_TOOLS,
         output_key="financial_agent",
+        result_key="financial_result",
         max_iterations=5,
     )

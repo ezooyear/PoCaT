@@ -13,5 +13,6 @@ def product_agent_node(state: AgentState) -> dict:
         system_prompt=PRODUCT_SYSTEM_PROMPT,
         tools=PRODUCT_TOOLS,
         output_key="product_agent",
+        result_key="product_result",
         max_iterations=3,
     )
