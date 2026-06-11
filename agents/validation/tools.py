@@ -36,14 +36,23 @@ REQUIRED_RESULTS_BY_TASK = {
     "eligibility_check": ["customer_result", "product_result", "eligibility_result"],
     "recommendation": [
         "customer_result",
+        "financial_result",
         "product_result",
         "eligibility_result",
         "recommend_result",
     ],
-    "switch_analysis": [
+    "early_termination": [
         "customer_result",
         "product_result",
         "financial_result",
+        "recommend_result",
+    ],
+    "switch_analysis": [
+        "customer_result",
+        "financial_result",
+        "product_result",
+        "eligibility_result",
+        "recommend_result",
     ],
 }
 
@@ -221,3 +230,84 @@ def run_validation_checks(state: AgentState) -> tuple[list[str], dict[str, bool]
     }
 
     return issues, checked_items
+
+def build_validation_context(state: AgentState) -> dict[str, Any]:
+    """
+    LLM 검증에 필요한 state 기반 구조화 정보를 수집합니다.
+
+    주의:
+    - 전체 messages나 긴 RAG 원문을 그대로 넘기지 않습니다.
+    - 각 Agent가 state에 저장한 구조화 결과 중심으로만 전달합니다.
+    """
+
+    agent_outputs = state.get("agent_outputs") or {}
+
+    return {
+        "user_query": state.get("user_query"),
+        "task_type": state.get("task_type"),
+        "plan": state.get("plan"),
+        "completed_agents": state.get("completed_agents"),
+        "current_step": state.get("current_step"),
+        "current_agent": state.get("current_agent"),
+        "errors": state.get("errors"),
+
+        "customer_result": state.get("customer_result") or agent_outputs.get("customer_agent"),
+        "product_result": state.get("product_result") or agent_outputs.get("product_agent"),
+        "financial_result": state.get("financial_result") or agent_outputs.get("financial_agent"),
+        "eligibility_result": state.get("eligibility_result") or agent_outputs.get("eligibility_agent"),
+        "recommend_result": state.get("recommend_result") or agent_outputs.get("recommend_agent"),
+
+        "agent_outputs_summary": {
+            agent_name: {
+                "status": result.get("status") if isinstance(result, dict) else None,
+                "error": result.get("error") if isinstance(result, dict) else None,
+            }
+            for agent_name, result in agent_outputs.items()
+        },
+    }
+
+
+def build_rule_based_verify_result(
+    rule_issues: list[str],
+    rule_checked_items: dict[str, bool],
+    llm_skipped: bool = False,
+) -> dict[str, Any]:
+    """
+    LLM 검증을 수행하지 않거나 실패했을 때 rule 기반 검증 결과만으로 verify_result를 생성합니다.
+    """
+
+    is_valid = len(rule_issues) == 0
+
+    if is_valid:
+        summary = "검증 완료"
+    elif llm_skipped:
+        summary = "rule 기반 검증에서 이슈가 발견되었습니다."
+    else:
+        summary = "LLM 검증에 실패하여 rule 기반 검증 결과만 사용했습니다."
+
+    return {
+        "status": "passed" if is_valid else "failed",
+        "is_valid": is_valid,
+        "summary": summary,
+        "issues": [
+            {
+                "level": "error",
+                "type": "rule_based_issue",
+                "message": issue,
+                "related_agent": None,
+                "suggestion": "해당 Agent 결과 구조와 state 저장 방식을 확인하세요.",
+            }
+            for issue in rule_issues
+        ],
+        "checked_items": {
+            **rule_checked_items,
+            "condition_conflict_checked": False,
+            "rate_amount_payment_checked": False,
+            "rag_evidence_checked": False,
+            "inappropriate_recommendation_checked": False,
+        },
+        "final_notes": [] if is_valid else [
+            "검증 이슈가 있으므로 최종 답변 전 관련 Agent 결과를 확인해야 합니다."
+        ],
+        "revision_required": not is_valid,
+    }
