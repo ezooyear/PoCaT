@@ -10,7 +10,6 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
-from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 from sentence_transformers import CrossEncoder
 
@@ -180,9 +179,7 @@ def search_products(query: str, k: int = 3) -> List[Document]:
     dense_results = vectorstore.similarity_search(query, k=candidates_limit)
 
     # 4. Sparse 검색 (BM25 검색)
-    bm25_retriever = BM25Retriever.from_documents(all_docs)
-    bm25_retriever.k = candidates_limit
-    sparse_results = bm25_retriever.invoke(query)
+    sparse_results = _search_sparse_with_bm25(all_docs, query, candidates_limit)
 
     # 5. 하이브리드 결과 병합 및 자식 청크 수준 중복 제거
     seen_ids = set()
@@ -246,3 +243,23 @@ def search_products(query: str, k: int = 3) -> List[Document]:
             break
 
     return final_docs
+
+
+def _search_sparse_with_bm25(
+    all_docs: List[Document],
+    query: str,
+    candidates_limit: int,
+) -> List[Document]:
+    try:
+        from langchain_community.retrievers import BM25Retriever
+    except Exception as e:
+        print(f"Warning: BM25 retriever import failed, using dense search only. error={e}")
+        return []
+
+    try:
+        bm25_retriever = BM25Retriever.from_documents(all_docs)
+        bm25_retriever.k = candidates_limit
+        return bm25_retriever.invoke(query)
+    except Exception as e:
+        print(f"Warning: BM25 retriever failed, using dense search only. error={e}")
+        return []

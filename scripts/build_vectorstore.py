@@ -1,46 +1,75 @@
 """
-Vector DB 빌드 스크립트
-- data/pdfs/ 폴더에 있는 PDF 파일들을 읽어 ChromaDB에 저장합니다.
-
-PDF 파일을 추가/변경한 후 이 스크립트를 다시 실행하면 DB가 재구축됩니다.
+Vector DB build script.
 """
-import sys
 import os
 import shutil
-
-# 프로젝트 루트를 path에 추가
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import sys
 
 from dotenv import load_dotenv
+
+# Add project root to path.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 load_dotenv()
 
-from db.vectorstore import build_vectorstore, CHROMA_DIR
+from db.vectorstore import CHROMA_DIR, build_vectorstore
 
 
 def main():
+    _configure_stdout()
+
     print("=" * 60)
-    print("🔧 Vector DB 빌드 스크립트")
+    print("Vector DB build script")
     print("=" * 60)
 
-    # 기존 DB가 있으면 삭제 후 재구축
     if os.path.exists(CHROMA_DIR):
-        print(f"\n⚠️  기존 Vector DB를 삭제합니다: {CHROMA_DIR}")
-        shutil.rmtree(CHROMA_DIR)
+        print(f"\nRemoving existing Vector DB: {CHROMA_DIR}")
+        try:
+            shutil.rmtree(CHROMA_DIR)
+        except PermissionError:
+            _print_locked_db_help(CHROMA_DIR)
+            sys.exit(1)
 
-    print("\n📦 Vector DB 구축을 시작합니다...\n")
-    vectorstore = build_vectorstore()
+    print("\nBuilding Vector DB...\n")
+    try:
+        vectorstore = build_vectorstore()
+    except PermissionError:
+        _print_locked_db_help(CHROMA_DIR)
+        sys.exit(1)
 
     if vectorstore:
         print("\n" + "=" * 60)
-        print("🎉 Vector DB 구축이 완료되었습니다!")
-        print("   이제 streamlit run app.py 로 앱을 실행하세요.")
+        print("Vector DB build completed.")
+        print("Run the app with: streamlit run app.py --server.fileWatcherType none")
         print("=" * 60)
-    else:
-        print("\n" + "=" * 60)
-        print("❌ Vector DB 구축에 실패했습니다.")
-        print("   data/pdfs/ 폴더에 PDF 파일을 넣고 다시 시도해주세요.")
-        print("=" * 60)
-        sys.exit(1)
+        return
+
+    print("\n" + "=" * 60)
+    print("Vector DB build failed.")
+    print("Check whether PDF files exist under data/pdfs and whether the embedding model can be downloaded.")
+    print("=" * 60)
+    sys.exit(1)
+
+
+def _configure_stdout():
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
+
+def _print_locked_db_help(chroma_dir: str):
+    print("\n" + "=" * 60)
+    print("Vector DB directory is locked by another process.")
+    print(f"Locked path: {chroma_dir}")
+    print("")
+    print("Please close any running Streamlit or Python processes using this project, then try again.")
+    print("Recommended order:")
+    print("1. Stop Streamlit")
+    print("2. Stop any Python process using Chroma DB")
+    print("3. Re-run: .\\venv\\Scripts\\python.exe scripts\\build_vectorstore.py")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

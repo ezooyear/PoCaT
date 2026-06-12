@@ -174,10 +174,7 @@ def run_agent_loop(
 
     # agent_outputs는 전체 에이전트 출력 기록용으로 유지
     outputs = dict(state.get("agent_outputs") or {})
-    outputs[output_key] = {
-        "summary": summary,
-        "tool_results": tool_results,
-    }
+    outputs[output_key] = structured_result
 
     # 완료된 agent 목록 업데이트
     completed_agents = list(state.get("completed_agents") or [])

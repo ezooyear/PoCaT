@@ -52,6 +52,15 @@ def classify_eligibility_results(eligibility_results: list[dict]) -> dict:
     rejected = []
 
     for item in eligibility_results:
+        if not isinstance(item, dict):
+            rejected.append(
+                {
+                    "product_name": str(item),
+                    "eligible": False,
+                    "ineligibility_reasons": ["결과 형식 오류"],
+                }
+            )
+            continue
         if item.get("eligible") is True and not item.get("check_required"):
             recommendable.append(item)
         elif item.get("eligible") is True and item.get("check_required"):
@@ -72,14 +81,16 @@ def build_recommendations(
 ) -> list[dict]:
     # 추천 가능한 상품만 점수화해 recommendation_results 형태로 만듭니다.
     financial_map = {
-        _normalize_name(item.get("product_name", "")): item for item in (financial_results or [])
+        _normalize_name(item.get("product_name", "")): item
+        for item in (financial_results or [])
+        if isinstance(item, dict)
     }
 
     recommendations = []
     recommendable_items = [
         item
         for item in eligibility_results
-        if item.get("eligible") is True and not item.get("check_required")
+        if isinstance(item, dict) and item.get("eligible") is True and not item.get("check_required")
     ]
 
     for item in recommendable_items:

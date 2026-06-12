@@ -213,6 +213,19 @@ def _parse_plan_response(text: str) -> dict:
     except json.JSONDecodeError:
         return _parse_plan_from_text(text)
 
+    if isinstance(data, str):
+        nested = _extract_json_text(data)
+        if nested != data:
+            try:
+                data = json.loads(nested)
+            except json.JSONDecodeError:
+                return _parse_plan_from_text(data)
+        else:
+            return _parse_plan_from_text(data)
+
+    if not isinstance(data, dict):
+        return _parse_plan_from_text(text)
+
     task_type = data.get("task_type", "casual")
     plan = data.get("plan", [])
 
@@ -310,9 +323,9 @@ def _ensure_required_agents(task_type: str, plan: list[str]) -> list[str]:
         ],
         "recommendation": [
             "customer_agent",
-            "financial_agent",
             "product_agent",
             "eligibility_agent",
+            "financial_agent",
             "recommend_agent",
             "validation_agent",
         ],
@@ -325,9 +338,9 @@ def _ensure_required_agents(task_type: str, plan: list[str]) -> list[str]:
         ],
         "switch_analysis": [
             "customer_agent",
-            "financial_agent",
             "product_agent",
             "eligibility_agent",
+            "financial_agent",
             "recommend_agent",
             "validation_agent",
         ],

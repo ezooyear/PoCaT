@@ -214,6 +214,18 @@ def _parse_json_response(text: str) -> dict[str, Any]:
             "revision_required": True,
         }
 
+    if isinstance(data, str):
+        nested = data.strip()
+        if not nested:
+            return {}
+        try:
+            data = json.loads(nested)
+        except json.JSONDecodeError:
+            return {}
+
+    if not isinstance(data, dict):
+        return {}
+
     return _normalize_verify_result(data)
 
 

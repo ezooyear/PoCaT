@@ -154,11 +154,25 @@ def validate_recommendation_consistency(state: AgentState) -> list[str]:
     if not recommend_result or not eligibility_result:
         return issues
 
+    if not isinstance(recommend_result, dict) or not isinstance(eligibility_result, dict):
+        return issues
+
     recommend_data = recommend_result.get("result", {})
     eligibility_data = eligibility_result.get("result", {})
 
-    recommended_products = recommend_data.get("recommended_products")
-    eligible_products = eligibility_data.get("eligible_products")
+    if not isinstance(recommend_data, dict):
+        recommend_data = {}
+    if not isinstance(eligibility_data, dict):
+        eligibility_data = {}
+
+    recommended_products = (
+        recommend_data.get("recommended_products")
+        or recommend_data.get("recommendations")
+    )
+    eligible_products = (
+        eligibility_data.get("eligible_products")
+        or eligibility_data.get("results")
+    )
 
     if not isinstance(recommended_products, list):
         return issues
