@@ -14,20 +14,30 @@ def parse_customer_profile(raw_profile: Any) -> dict:
     if isinstance(raw_profile, dict):
         profile = dict(raw_profile)
         profile["raw_text"] = json.dumps(raw_profile, ensure_ascii=False)
+        profile["is_soldier"] = _infer_is_soldier(profile.get("job"), profile["raw_text"])
         return profile
 
     text = str(raw_profile or "")
     lowered = text.lower()
+    job = _extract_text(
+        text,
+        [
+            r"직업[:\s]*([^\n,|]+)",
+            r"customer_job\s*\|\s*([^\n|]+)",
+            r"\|\s*customer_job\s*\|\s*([^\n|]+)",
+        ],
+    )
 
     return {
         "age": _extract_int(text, [r"나이[:\s]*([0-9]{1,2})", r"만\s*([0-9]{1,2})세"]),
-        "job": _extract_text(text, [r"직업[:\s]*([^\n,]+)"]),
+        "job": job,
         "monthly_saving_amount": _extract_int(
             text,
             [
                 r"월\s*가용\s*저축액[:\s]*([0-9,]+)",
                 r"가용저축액[:\s]*([0-9,]+)",
                 r"월\s*납입\s*가능\s*금액[:\s]*([0-9,]+)",
+                r"available_monthly_saving\s*\|\s*([0-9,]+)",
             ],
         ),
         "salary_transfer": "급여이체" in lowered and "없" not in lowered,
@@ -35,7 +45,7 @@ def parse_customer_profile(raw_profile: Any) -> dict:
         "card_usage": "카드" in lowered and "없" not in lowered,
         "main_bank": "주거래" in lowered,
         "marketing_agree": "마케팅" in lowered and "동의" in lowered,
-        "is_soldier": any(keyword in lowered for keyword in ["군인", "장병", "직업군인", "부사관", "장교"]),
+        "is_soldier": _infer_is_soldier(job, text),
         "is_miso_target": any(keyword in lowered for keyword in ["미소드림", "서민", "저소득", "취약계층"]),
         "raw_text": text,
     }
@@ -71,6 +81,18 @@ def _build_product_candidate(text: str) -> dict:
     # 상품 설명 한 덩어리에서 가입 판단에 필요한 규칙성 정보만 뽑습니다.
     lowered = text.lower()
     product_name = _extract_product_name(text)
+    military_markers = [
+        "군인 전용",
+        "장병",
+        "직업군인",
+        "군 복무",
+        "현역",
+        "장기간부",
+        "군간부",
+        "병사",
+        "부사관",
+        "장교",
+    ]
 
     return {
         "product_name": product_name,
@@ -108,7 +130,7 @@ def _build_product_candidate(text: str) -> dict:
             ],
         ),
         "sale_closed": any(keyword in lowered for keyword in ["판매 종료", "판매종료", "판매 중단", "신규 불가"]),
-        "military_only": any(keyword in lowered for keyword in ["군인 전용", "장병", "직업군인"]),
+        "military_only": any(keyword in lowered for keyword in military_markers),
         "miso_dream_only": "미소드림" in text,
         "bonus_keywords": [
             label
@@ -318,6 +340,23 @@ def _extract_text(text: str, patterns: list[str]) -> str | None:
         if match:
             return match.group(1).strip()
     return None
+
+
+def _infer_is_soldier(job: Any, raw_text: str) -> bool:
+    markers = ["군인", "장병", "직업군인", "부사관", "장교", "군간부", "병사", "하사", "중사", "대위"]
+
+    job_text = str(job or "").strip().lower()
+    if job_text and any(marker in job_text for marker in markers):
+        return True
+
+    explicit_patterns = [
+        r"(?:직업|customer_job)[:\s|]*(군인|직업군인|부사관|장교|병사|군간부)",
+        r"군\s*복무[:\s|]*(예|참|중)",
+        r"군인\s*여부[:\s|]*(예|참|yes|true)",
+    ]
+    lowered = str(raw_text or "").lower()
+
+    return any(re.search(pattern, lowered) for pattern in explicit_patterns)
 
 
 def _dedupe(items: list[str]) -> list[str]:
