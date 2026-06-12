@@ -22,17 +22,24 @@ CHROMA_DIR = os.path.join(BASE_DIR, "data", "chroma_db")
 EMBEDDING_MODEL_NAME = "BAAI/bge-m3"
 RERANKER_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 
-# 리랭커 모델 싱글톤 캐시
+# 프로세스 단위 싱글톤 캐시
+_EMBEDDINGS_INSTANCE = None
+_VECTORSTORE_INSTANCE = None
+_ALL_DOCS_CACHE = None
+_BM25_RETRIEVER_INSTANCE = None
 _RERANKER_INSTANCE = None
 
 
 def _get_embeddings():
     """HuggingFace 임베딩 모델 인스턴스를 반환합니다."""
-    return HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL_NAME,
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True},
-    )
+    global _EMBEDDINGS_INSTANCE
+    if _EMBEDDINGS_INSTANCE is None:
+        _EMBEDDINGS_INSTANCE = HuggingFaceEmbeddings(
+            model_name=EMBEDDING_MODEL_NAME,
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True},
+        )
+    return _EMBEDDINGS_INSTANCE
 
 
 def _get_reranker() -> CrossEncoder:
@@ -116,6 +123,8 @@ def build_vectorstore():
         shutil.rmtree(CHROMA_DIR)
         print("🧹 기존 Vector DB 디렉토리 삭제 완료")
 
+    _reset_vectorstore_caches()
+
     # 임베딩 & ChromaDB 저장
     print(f"🔄 임베딩 생성 및 Chroma DB 저장 중...")
     embeddings = _get_embeddings()
@@ -128,11 +137,17 @@ def build_vectorstore():
 
     print(f"✅ Vector DB 구축 완료! ({CHROMA_DIR})")
     print(f"   저장된 자식 청크 수: {len(child_docs)}")
+    _prime_vectorstore_caches(vectorstore, child_docs)
     return vectorstore
 
 
 def get_vectorstore():
     """기존에 구축된 Vector DB를 로드합니다."""
+    global _VECTORSTORE_INSTANCE
+
+    if _VECTORSTORE_INSTANCE is not None:
+        return _VECTORSTORE_INSTANCE
+
     if not os.path.exists(CHROMA_DIR):
         return None
 
@@ -147,6 +162,7 @@ def get_vectorstore():
         count = vectorstore._collection.count()
         if count == 0:
             return None
+        _VECTORSTORE_INSTANCE = vectorstore
         return vectorstore
     except Exception:
         return None
@@ -163,14 +179,9 @@ def search_products(query: str, k: int = 3) -> List[Document]:
         return []
 
     # 1. ChromaDB에 저장된 모든 자식 문서 로드 (BM25 색인용)
-    all_data = vectorstore.get()
-    if not all_data or not all_data["documents"]:
+    all_docs = _get_all_docs(vectorstore)
+    if not all_docs:
         return []
-
-    # get() 메서드로 반환된 데이터를 Document 객체 리스트로 복원
-    all_docs = []
-    for doc_id, text, metadata in zip(all_data["ids"], all_data["documents"], all_data["metadatas"]):
-        all_docs.append(Document(page_content=text, metadata=metadata))
 
     # 2. 1차 후보군 추출 개수 설정 (최대 후보 15개)
     candidates_limit = max(k * 4, 15)
@@ -250,6 +261,8 @@ def _search_sparse_with_bm25(
     query: str,
     candidates_limit: int,
 ) -> List[Document]:
+    global _BM25_RETRIEVER_INSTANCE
+
     try:
         from langchain_community.retrievers import BM25Retriever
     except Exception as e:
@@ -257,9 +270,45 @@ def _search_sparse_with_bm25(
         return []
 
     try:
-        bm25_retriever = BM25Retriever.from_documents(all_docs)
-        bm25_retriever.k = candidates_limit
-        return bm25_retriever.invoke(query)
+        if _BM25_RETRIEVER_INSTANCE is None:
+            _BM25_RETRIEVER_INSTANCE = BM25Retriever.from_documents(all_docs)
+
+        _BM25_RETRIEVER_INSTANCE.k = candidates_limit
+        return _BM25_RETRIEVER_INSTANCE.invoke(query)
     except Exception as e:
         print(f"Warning: BM25 retriever failed, using dense search only. error={e}")
         return []
+
+
+def _get_all_docs(vectorstore) -> List[Document]:
+    global _ALL_DOCS_CACHE
+
+    if _ALL_DOCS_CACHE is not None:
+        return _ALL_DOCS_CACHE
+
+    all_data = vectorstore.get()
+    if not all_data or not all_data.get("documents"):
+        return []
+
+    docs = []
+    for text, metadata in zip(all_data["documents"], all_data["metadatas"]):
+        docs.append(Document(page_content=text, metadata=metadata))
+
+    _ALL_DOCS_CACHE = docs
+    return docs
+
+
+def _prime_vectorstore_caches(vectorstore, child_docs: List[Document]) -> None:
+    global _VECTORSTORE_INSTANCE, _ALL_DOCS_CACHE, _BM25_RETRIEVER_INSTANCE
+
+    _VECTORSTORE_INSTANCE = vectorstore
+    _ALL_DOCS_CACHE = list(child_docs)
+    _BM25_RETRIEVER_INSTANCE = None
+
+
+def _reset_vectorstore_caches() -> None:
+    global _VECTORSTORE_INSTANCE, _ALL_DOCS_CACHE, _BM25_RETRIEVER_INSTANCE
+
+    _VECTORSTORE_INSTANCE = None
+    _ALL_DOCS_CACHE = None
+    _BM25_RETRIEVER_INSTANCE = None

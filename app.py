@@ -83,6 +83,22 @@ if "graph" not in st.session_state:
 if "conversation_messages" not in st.session_state:
     st.session_state.conversation_messages = []
 
+
+def _build_next_conversation(messages: list, latest_user_prompt: str, latest_ai_content: str) -> list[tuple[str, str]]:
+    """다음 턴에 넘길 최소 대화 히스토리만 유지합니다."""
+    preserved = []
+
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+        if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
+            preserved.append((role, content))
+
+    # 화면 표시용 히스토리가 이미 최신 상태이므로 현재 턴도 그대로 반영합니다.
+    preserved.append(("user", latest_user_prompt))
+    preserved.append(("assistant", latest_ai_content))
+    return preserved
+
 # ─── 기존 대화 히스토리 표시 ───
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖"):
@@ -121,15 +137,15 @@ if prompt := st.chat_input("궁금한 점을 입력하세요..."):
 
                 st.markdown(ai_content)
 
-                # 대화 히스토리 갱신
-                st.session_state.conversation_messages = [
-                    (msg.type if hasattr(msg, "type") else "user",
-                     msg.content if hasattr(msg, "content") else str(msg))
-                    for msg in result["messages"]
-                ]
-
                 # 화면 표시용 메시지 저장
                 st.session_state.messages.append({"role": "assistant", "content": ai_content})
+
+                # 다음 턴에는 내부 agent 메시지를 제외한 사용자/최종 답변만 전달합니다.
+                st.session_state.conversation_messages = _build_next_conversation(
+                    st.session_state.messages[:-2],
+                    prompt,
+                    ai_content,
+                )
 
             except Exception as e:
                 error_msg = f"❌ 오류가 발생했습니다: {e}"
