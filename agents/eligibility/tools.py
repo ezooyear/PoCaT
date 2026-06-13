@@ -81,6 +81,7 @@ def _build_product_candidate(text: str) -> dict:
     # 상품 설명 한 덩어리에서 가입 판단에 필요한 규칙성 정보만 뽑습니다.
     lowered = text.lower()
     product_name = _extract_product_name(text)
+    combined_text = f"{product_name}\n{text}".lower()
     military_markers = [
         "군인 전용",
         "장병",
@@ -130,7 +131,7 @@ def _build_product_candidate(text: str) -> dict:
             ],
         ),
         "sale_closed": any(keyword in lowered for keyword in ["판매 종료", "판매종료", "판매 중단", "신규 불가"]),
-        "military_only": any(keyword in lowered for keyword in military_markers),
+        "military_only": any(keyword in combined_text for keyword in military_markers),
         "miso_dream_only": "미소드림" in text,
         "bonus_keywords": [
             label

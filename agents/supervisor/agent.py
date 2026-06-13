@@ -92,9 +92,29 @@ def _plan_mode(state: AgentState) -> dict:
 
     state_messages = list(state.get("messages", []))
     user_query = state.get("user_query") or _get_last_user_text(state_messages)
+    normalized_query = (user_query or "").lower().replace(" ", "")
 
     # 1차: 규칙 기반 routing
-    routing = _fallback_routing(user_query)
+    if (
+        "추천" in normalized_query
+        or "recommend" in normalized_query
+        or "추천상품" in normalized_query
+        or "가입불가상품" in normalized_query
+        or "추가확인필요상품" in normalized_query
+    ):
+        routing = {
+            "task_type": "recommendation",
+            "plan": [
+                "customer_agent",
+                "product_agent",
+                "eligibility_agent",
+                "financial_agent",
+                "recommend_agent",
+                "validation_agent",
+            ],
+        }
+    else:
+        routing = _fallback_routing(user_query)
 
     # 2차: 규칙으로 일반 대화로만 잡힌 경우 LLM에게 판단 요청
     # 단, 진짜 인사/감사 표현이면 direct response로 처리된다.
@@ -383,8 +403,10 @@ def _fallback_routing(user_query: str) -> dict:
 
     query = (user_query or "").lower().replace(" ", "")
 
-    # 1. 중도해지
-    if any(keyword in query for keyword in [
+    def has_any(keywords: list[str]) -> bool:
+        return any(keyword and keyword in query for keyword in keywords)
+
+    early_termination_keywords = [
         "중도해지",
         "해지손실",
         "해지하면",
@@ -395,20 +417,8 @@ def _fallback_routing(user_query: str) -> dict:
         "깨면",
         "깨도",
         "해지해도",
-    ]):
-        return {
-            "task_type": "early_termination",
-            "plan": [
-                "customer_agent",
-                "product_agent",
-                "financial_agent",
-                "recommend_agent",
-                "validation_agent",
-            ],
-        }
-
-    # 2. 갈아타기
-    if any(keyword in query for keyword in [
+    ]
+    switch_keywords = [
         "갈아타기",
         "갈아타는게",
         "갈아탈까",
@@ -420,23 +430,14 @@ def _fallback_routing(user_query: str) -> dict:
         "더높은금리",
         "이득이야",
         "이득인지",
-    ]):
-        return {
-            "task_type": "switch_analysis",
-            "plan": [
-                "customer_agent",
-                "financial_agent",
-                "product_agent",
-                "eligibility_agent",
-                "recommend_agent",
-                "validation_agent",
-            ],
-        }
-
-    # 3. 추천
-    if any(keyword in query for keyword in [
+    ]
+    recommendation_keywords = [
         "추천",
         "recommend",
+        "추천상품",
+        "추가확인가능상품",
+        "추가확인필요상품",
+        "가입불가상품",
         "추가가입",
         "가입할만한",
         "뭐가좋아",
@@ -446,21 +447,8 @@ def _fallback_routing(user_query: str) -> dict:
         "내조건에맞는",
         "목적에맞는",
         "가입가능한상품중",
-    ]):
-        return {
-            "task_type": "recommendation",
-            "plan": [
-                "customer_agent",
-                "financial_agent",
-                "product_agent",
-                "eligibility_agent",
-                "recommend_agent",
-                "validation_agent",
-            ],
-        }
-
-    # 4. 가입 가능 여부 / 우대금리 충족 여부
-    if any(keyword in query for keyword in [
+    ]
+    eligibility_keywords = [
         "가입가능",
         "가입할수",
         "가입돼",
@@ -473,19 +461,8 @@ def _fallback_routing(user_query: str) -> dict:
         "가능한상품",
         "가입가능한상품",
         "필터링",
-    ]):
-        return {
-            "task_type": "eligibility_check",
-            "plan": [
-                "customer_agent",
-                "product_agent",
-                "eligibility_agent",
-                "validation_agent",
-            ],
-        }
-
-    # 5. 고객 기준 계산/납입/잔액/만기
-    if any(keyword in query for keyword in [
+    ]
+    financial_keywords = [
         "납입",
         "납입현황",
         "몇번냈",
@@ -499,19 +476,8 @@ def _fallback_routing(user_query: str) -> dict:
         "만기때",
         "수령액",
         "예상금액",
-    ]):
-        return {
-            "task_type": "financial_analysis",
-            "plan": [
-                "customer_agent",
-                "financial_agent",
-                "validation_agent",
-            ],
-        }
-
-    # 6. 고객 조회
-    # '상품'이라는 단어가 있어도 '내 가입 상품'이면 product_agent가 아니라 customer_agent로 가야 함.
-    if any(keyword in query for keyword in [
+    ]
+    customer_lookup_keywords = [
         "내가입",
         "가입상품",
         "내계좌",
@@ -523,17 +489,8 @@ def _fallback_routing(user_query: str) -> dict:
         "내적금",
         "내예금",
         "가입한상품",
-    ]):
-        return {
-            "task_type": "customer_lookup",
-            "plan": [
-                "customer_agent",
-            ],
-        }
-
-    # 7. 단순 상품/약관/RAG
-    # '상품' 단독 키워드는 넣지 않음.
-    if any(keyword in query for keyword in [
+    ]
+    product_info_keywords = [
         "약관",
         "우대",
         "우대금리",
@@ -550,7 +507,91 @@ def _fallback_routing(user_query: str) -> dict:
         "금리조회",
         "상품정보",
         "조건알려",
-    ]):
+    ]
+    simple_calc_keywords = [
+        "단리",
+        "복리",
+        "계산해줘",
+        "계산하면",
+    ]
+
+    # 1. 중도해지
+    if has_any(early_termination_keywords):
+        return {
+            "task_type": "early_termination",
+            "plan": [
+                "customer_agent",
+                "product_agent",
+                "financial_agent",
+                "recommend_agent",
+                "validation_agent",
+            ],
+        }
+
+    # 2. 갈아타기
+    if has_any(switch_keywords):
+        return {
+            "task_type": "switch_analysis",
+            "plan": [
+                "customer_agent",
+                "financial_agent",
+                "product_agent",
+                "eligibility_agent",
+                "recommend_agent",
+                "validation_agent",
+            ],
+        }
+
+    # 3. 추천
+    if has_any(recommendation_keywords):
+        return {
+            "task_type": "recommendation",
+            "plan": [
+                "customer_agent",
+                "financial_agent",
+                "product_agent",
+                "eligibility_agent",
+                "recommend_agent",
+                "validation_agent",
+            ],
+        }
+
+    # 4. 가입 가능 여부 / 우대금리 충족 여부
+    if has_any(eligibility_keywords):
+        return {
+            "task_type": "eligibility_check",
+            "plan": [
+                "customer_agent",
+                "product_agent",
+                "eligibility_agent",
+                "validation_agent",
+            ],
+        }
+
+    # 5. 고객 기준 계산/납입/잔액/만기
+    if has_any(financial_keywords):
+        return {
+            "task_type": "financial_analysis",
+            "plan": [
+                "customer_agent",
+                "financial_agent",
+                "validation_agent",
+            ],
+        }
+
+    # 6. 고객 조회
+    # '상품'이라는 단어가 있어도 '내 가입 상품'이면 product_agent가 아니라 customer_agent로 가야 함.
+    if has_any(customer_lookup_keywords):
+        return {
+            "task_type": "customer_lookup",
+            "plan": [
+                "customer_agent",
+            ],
+        }
+
+    # 7. 단순 상품/약관/RAG
+    # '상품' 단독 키워드는 넣지 않음.
+    if has_any(product_info_keywords):
         return {
             "task_type": "product_info",
             "plan": [
@@ -559,12 +600,7 @@ def _fallback_routing(user_query: str) -> dict:
         }
 
     # 8. 단순 가상 계산
-    if any(keyword in query for keyword in [
-        "단리",
-        "복리",
-        "계산해줘",
-        "계산하면",
-    ]):
+    if has_any(simple_calc_keywords):
         return {
             "task_type": "financial_analysis",
             "plan": [
