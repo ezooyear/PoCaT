@@ -21,3 +21,6 @@ rank_bm25>=0.2.2
 
 # UI
 streamlit>=1.30.0
+
+# Observability
+langfuse>=4.7.0
