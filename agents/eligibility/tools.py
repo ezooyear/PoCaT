@@ -19,6 +19,25 @@ def parse_customer_profile(raw_profile: Any) -> dict:
 
     text = str(raw_profile or "")
     lowered = text.lower()
+    table_row = _parse_first_table_row(text)
+
+    if table_row:
+        job = table_row.get("customer_job")
+        raw_text = json.dumps(table_row, ensure_ascii=False)
+        return {
+            "age": _extract_age_from_birth_date(table_row.get("birth_date")),
+            "job": job,
+            "monthly_saving_amount": _to_int(table_row.get("available_monthly_saving")),
+            "salary_transfer": _to_bool(table_row.get("salary_transfer_yn")),
+            "auto_transfer": _to_bool(table_row.get("auto_transfer_yn")),
+            "card_usage": _to_bool(table_row.get("card_usage_yn")),
+            "main_bank": _to_bool(table_row.get("main_bank_yn")),
+            "marketing_agree": _to_bool(table_row.get("marketing_agree_yn")),
+            "is_soldier": _infer_is_soldier(job, raw_text),
+            "is_miso_target": any(keyword in raw_text.lower() for keyword in ["미소드림", "서민", "저소득", "취약계층"]),
+            "raw_text": raw_text,
+        }
+
     job = _extract_text(
         text,
         [
@@ -358,6 +377,57 @@ def _infer_is_soldier(job: Any, raw_text: str) -> bool:
     lowered = str(raw_text or "").lower()
 
     return any(re.search(pattern, lowered) for pattern in explicit_patterns)
+
+
+def _parse_first_table_row(text: str) -> dict[str, str]:
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    header = None
+
+    for index, line in enumerate(lines):
+        if "|" not in line:
+            continue
+
+        parts = [part.strip() for part in line.split("|")]
+
+        if header is None and "customer_id" in line.lower():
+            header = parts
+            continue
+
+        if header is not None:
+            if set(line) == {"-"}:
+                continue
+            if len(parts) == len(header):
+                return dict(zip(header, parts))
+
+    return {}
+
+
+def _to_bool(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return text in {"예", "yes", "true", "1", "y"}
+
+
+def _to_int(value: Any) -> int | None:
+    digits = re.sub(r"[^0-9]", "", str(value or ""))
+    if not digits:
+        return None
+    return int(digits)
+
+
+def _extract_age_from_birth_date(value: Any) -> int | None:
+    text = str(value or "").strip()
+    match = re.match(r"(\d{4})-(\d{2})-(\d{2})", text)
+    if not match:
+        return None
+
+    birth_year, birth_month, birth_day = map(int, match.groups())
+    from datetime import date
+
+    today = date.today()
+    age = today.year - birth_year
+    if (today.month, today.day) < (birth_month, birth_day):
+        age -= 1
+    return age
 
 
 def _dedupe(items: list[str]) -> list[str]:
