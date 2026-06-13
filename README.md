@@ -149,3 +149,57 @@ streamlit run app.py
 - [x] Phase 6: 에이전트 역할 세분화 (6개 에이전트) 및 도구 특화 적용
 - [x] Phase 7: Customer Agent 신설, 에이전트별 디렉토리 구조 리팩터링, Supervisor 통제형 A2A 협업 루프 도입
 - [x] Phase 8: 상품 정보 RAG 전용화(DB SQL 조회 차단), 루트 tools 폴더 삭제 및 customer_agent 내부 캡슐화 완료
+
+---
+
+## Langfuse Setup
+
+Team members only need to configure the Langfuse keys locally after pulling `main`.
+
+### 1. Create `.env`
+
+Copy `.env.example` to `.env` and fill in the Langfuse values:
+
+```env
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_HOST=https://cloud.langfuse.com
+```
+
+If you are also running the app locally, make sure the existing OpenRouter and PostgreSQL values are set in the same `.env` file.
+
+### 2. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Verify Langfuse connectivity
+
+```bash
+python scripts/check_langfuse.py
+```
+
+Expected result:
+
+- `auth_check=True`
+- `trace_sent=True`
+
+This sends a smoke-test trace with:
+
+- trace name: `langfuse-smoke-test`
+- observation name: `langfuse_smoke_test`
+
+### 4. Run the app
+
+```bash
+streamlit run app.py --server.fileWatcherType none
+```
+
+### 5. What is traced
+
+- Streamlit chat turns
+- Shared agent execution loop
+- `eligibility_agent`
+- `recommend_agent`
+- LangChain LLM calls through the configured callback handler
