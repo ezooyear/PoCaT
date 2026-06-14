@@ -32,6 +32,7 @@ from agents.supervisor.prompts import (
     SUPERVISOR_SYNTHESIZE_PROMPT,
     SUPERVISOR_DIRECT_RESPONSE_PROMPT,
 )
+from agent_cards.loader import format_agent_card_summary
 
 
 AGENT_OPTIONS = [
@@ -200,16 +201,39 @@ def _synthesize_mode(state: AgentState) -> dict:
         ),
     }
 
+# a2a 
+def _build_plan_prompt_with_agent_cards() -> str:
+    """
+    A2A Agent Card 요약을 Supervisor plan prompt에 주입합니다.
 
+    주의:
+    SUPERVISOR_PLAN_PROMPT에는 JSON 예시 중괄호가 포함되어 있으므로
+    str.format() 대신 replace()를 사용합니다.
+    """
+    try:
+        agent_card_summary = format_agent_card_summary(include_supervisor=False)
+    except Exception as e:
+        agent_card_summary = (
+            "Agent Card를 불러오지 못했습니다. "
+            f"기존 Supervisor routing 규칙을 우선 사용하세요. 오류: {str(e)}"
+        )
+
+    return SUPERVISOR_PLAN_PROMPT.replace(
+        "{{AGENT_CARD_SUMMARY}}",
+        agent_card_summary,
+    )
+
+# a2a로 인해 수정
 def _llm_plan_routing(messages: list) -> dict:
-    """
-    LLM 기반 plan 생성.
-    """
+    """LLM 기반 plan 생성.
 
+    A2A Agent Card 요약을 포함한 Supervisor prompt를 사용합니다.
+    """
     llm = get_llm()
 
     try:
-        request_messages = [SystemMessage(content=SUPERVISOR_PLAN_PROMPT)] + messages
+        plan_prompt = _build_plan_prompt_with_agent_cards()
+        request_messages = [SystemMessage(content=plan_prompt)] + messages
         response = llm.invoke(request_messages)
         return _parse_plan_response(response.content.strip())
 

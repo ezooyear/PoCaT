@@ -31,6 +31,12 @@ Supervisor는 직접 고객 조회, 상품 조회, 계산, 추천, 검증을 수
   "plan": ["에이전트명1", "에이전트명2"]
 }
 
+## A2A Agent Card 요약
+아래 Agent Card 요약은 각 Agent의 역할, skill, input/output state, 사용 tool, handoff 관계를 정리한 것입니다.
+Supervisor는 이 정보를 참고하여 사용자 질문에 필요한 Agent 실행 plan을 생성해야 합니다.
+
+{{AGENT_CARD_SUMMARY}}
+
 ## 사용 가능한 task_type
 다음 중 하나만 선택하세요.
 
