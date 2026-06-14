@@ -1,0 +1,86 @@
+{
+  "name": "supervisor",
+  "description": "사용자 질문을 분석하여 필요한 Agent 실행 계획을 수립하고, 모든 전문 Agent 실행 이후 State 결과를 종합하여 최종 답변을 생성하는 Supervisor Agent",
+  "version": "1.0.0",
+  "input_state_keys": [
+    "user_query",
+    "member_id",
+    "customer_id",
+    "messages",
+    "task_type",
+    "plan",
+    "current_step",
+    "current_agent",
+    "completed_agents",
+    "agent_outputs",
+    "customer_result",
+    "product_result",
+    "financial_result",
+    "eligibility_result",
+    "recommend_result",
+    "validation_result",
+    "errors"
+  ],
+  "output_state_keys": [
+    "user_query",
+    "task_type",
+    "plan",
+    "next",
+    "current_step",
+    "current_agent",
+    "completed_agents",
+    "agent_outputs",
+    "agent_logs",
+    "draft_answer",
+    "final_answer",
+    "messages"
+  ],
+  "tools": [
+    "agent_card_registry",
+    "final_response_synthesizer"
+  ],
+  "skills": [
+    {
+      "id": "intent_classification",
+      "name": "사용자 의도 분류",
+      "description": "사용자 질문을 고객 조회, 상품 정보 조회, 금융 계산, 가입 가능 여부, 추천, 중도해지, 갈아타기 분석, 일반 대화로 분류한다."
+    },
+    {
+      "id": "agent_planning",
+      "name": "Agent 실행 계획 수립",
+      "description": "사용자 질문에 맞는 task_type과 전문 Agent 실행 plan을 생성한다."
+    },
+    {
+      "id": "agent_routing",
+      "name": "Agent 라우팅",
+      "description": "생성된 plan의 첫 번째 Agent를 next로 지정하고, LangGraph 실행 흐름이 plan 순서를 따르도록 제어한다."
+    },
+    {
+      "id": "direct_response",
+      "name": "일반 대화 직접 응답",
+      "description": "전문 Agent가 필요 없는 인사, 감사, 기능 안내 질문에는 직접 응답하고 FINISH로 종료한다."
+    },
+    {
+      "id": "final_context_building",
+      "name": "최종 답변 Context 구성",
+      "description": "각 Agent가 State에 저장한 customer_result, product_result, financial_result, eligibility_result, recommend_result, validation_result, agent_outputs를 모아 최종 답변 생성을 위한 context를 구성한다."
+    },
+    {
+      "id": "validated_final_answer_generation",
+      "name": "검증 반영 최종 답변 생성",
+      "description": "Validation 결과와 각 Agent의 구조화 결과를 반영하여 사용자에게 제공할 최종 답변을 생성한다."
+    }
+  ],
+  "handoff": {
+    "next_agents": [
+      "customer_agent",
+      "product_agent",
+      "financial_agent",
+      "eligibility_agent",
+      "recommend_agent",
+      "validation_agent",
+      "FINISH"
+    ],
+    "state_contract": "최초 실행 시 plan, next, task_type을 생성하고, 마지막 실행 시 각 Agent 결과와 validation_result를 종합해 final_answer와 messages를 생성한다."
+  }
+}

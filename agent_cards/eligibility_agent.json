@@ -1,0 +1,63 @@
+{
+  "name": "eligibility_agent",
+  "description": "고객 정보와 상품 조건을 대조하여 가입 가능 여부와 우대조건 충족 여부를 판단하는 Agent",
+  "version": "1.0.0",
+  "input_state_keys": [
+    "user_query",
+    "member_id",
+    "customer_id",
+    "messages",
+    "agent_outputs",
+    "customer_result",
+    "product_result",
+    "product_candidates",
+    "customer_profile",
+    "customer_accounts",
+    "financial_result"
+  ],
+  "output_state_keys": [
+    "eligibility_result",
+    "eligibility_results",
+    "customer_profile",
+    "customer_accounts",
+    "product_candidates",
+    "agent_outputs.eligibility_agent",
+    "messages",
+    "current_step",
+    "current_agent",
+    "completed_agents",
+    "context"
+  ],
+  "tools": [
+    "parse_customer_profile",
+    "parse_customer_accounts",
+    "extract_product_candidates",
+    "evaluate_product_eligibility",
+    "build_eligibility_summary"
+  ],
+  "skills": [
+    {
+      "id": "basic_eligibility_check",
+      "name": "기본 가입 가능 여부 판단",
+      "description": "고객의 나이, 가입 금액, 가입 기간, 상품 판매 상태, 가입 채널 조건 등을 기준으로 가입 가능 여부를 판단한다."
+    },
+    {
+      "id": "preferential_condition_check",
+      "name": "우대조건 충족 여부 판단",
+      "description": "급여이체, 자동이체, 카드 사용, 마케팅 동의 등 고객 조건과 상품 우대조건을 대조한다."
+    },
+    {
+      "id": "ineligible_reason_summary",
+      "name": "가입 불가 사유 정리",
+      "description": "가입이 어려운 상품에 대해 어떤 조건을 충족하지 못했는지 사유를 구조화하여 정리한다."
+    }
+  ],
+  "handoff": {
+    "next_agents": [
+      "recommend_agent",
+      "validation_agent",
+      "supervisor"
+    ],
+    "state_contract": "가입 가능 여부와 우대조건 판단 결과는 eligibility_result, eligibility_results, agent_outputs.eligibility_agent에 저장한다."
+  }
+}

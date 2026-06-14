@@ -1,0 +1,60 @@
+{
+  "name": "recommend_agent",
+  "description": "고객 정보, 상품 조건, 가입 가능 여부, 계산 결과를 종합하여 추천 가능한 예적금 상품을 순위화하는 Agent",
+  "version": "1.0.0",
+  "input_state_keys": [
+    "user_query",
+    "member_id",
+    "customer_id",
+    "messages",
+    "agent_outputs",
+    "customer_result",
+    "product_result",
+    "financial_result",
+    "financial_results",
+    "eligibility_result",
+    "eligibility_results",
+    "product_candidates"
+  ],
+  "output_state_keys": [
+    "recommend_result",
+    "recommendation_results",
+    "financial_results",
+    "agent_outputs.recommend_agent",
+    "messages",
+    "current_step",
+    "current_agent",
+    "completed_agents",
+    "context"
+  ],
+  "tools": [
+    "classify_eligibility_results",
+    "parse_financial_results",
+    "build_recommendations",
+    "build_recommendation_summary"
+  ],
+  "skills": [
+    {
+      "id": "eligible_product_filtering",
+      "name": "추천 가능 상품 필터링",
+      "description": "Eligibility Agent의 가입 가능 여부 판단 결과를 기반으로 실제 추천 가능한 상품만 선별한다."
+    },
+    {
+      "id": "personalized_product_ranking",
+      "name": "개인화 상품 순위화",
+      "description": "고객의 조건, 저축 여력, 가입 가능 여부, 계산 결과를 반영하여 상품을 순위화한다."
+    },
+    {
+      "id": "recommendation_reason_generation",
+      "name": "추천 사유 생성",
+      "description": "추천 상품별로 고객에게 적합한 이유, 예상 장점, 주의사항을 설명한다."
+    }
+  ],
+  "handoff": {
+    "next_agents": [
+      "validation_agent",
+      "supervisor"
+    ],
+    "state_contract": "추천 결과는 recommend_result, recommendation_results, agent_outputs.recommend_agent에 저장한다."
+  }
+}

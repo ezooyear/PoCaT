@@ -1,0 +1,62 @@
+{
+  "name": "customer_agent",
+  "description": "고객 ID를 기반으로 고객 기본 정보, 가입 계좌, 납입 이력을 조회하며, NL2SQL로 생성한 SELECT 쿼리를 MCP 기반 PostgreSQL Tool을 통해 실행하는 Agent",
+  "version": "1.0.0",
+  "input_state_keys": [
+    "user_query",
+    "member_id",
+    "customer_id",
+    "messages",
+    "agent_outputs"
+  ],
+  "output_state_keys": [
+    "customer_result",
+    "agent_outputs.customer_agent",
+    "messages",
+    "current_step",
+    "current_agent",
+    "completed_agents"
+  ],
+  "tools": [
+    "CUSTOMER_TOOLS",
+    "get_customer_profile",
+    "get_customer_accounts",
+    "get_payment_history",
+    "postgres_mcp_client.call_postgres_mcp_tool",
+    "mcp.execute_select_query",
+    "db.postgres_db.execute_query_fallback"
+  ],
+  "skills": [
+    {
+      "id": "customer_profile_lookup",
+      "name": "고객 기본 정보 조회",
+      "description": "고객 ID를 기준으로 고객명, 생년월일, 직업, 소득 수준, 거래 조건 정보를 조회한다."
+    },
+    {
+      "id": "customer_account_lookup",
+      "name": "가입 계좌 조회",
+      "description": "고객이 보유한 예금 및 적금 계좌, 가입일, 만기일, 잔액, 적용 금리 정보를 조회한다."
+    },
+    {
+      "id": "customer_payment_history_lookup",
+      "name": "납입 이력 조회",
+      "description": "고객 계좌의 납입 이력과 거래 정보를 조회하여 후속 Financial, Eligibility, Recommend Agent가 활용할 수 있도록 제공한다."
+    },
+    {
+      "id": "nl2sql_mcp_query_execution",
+      "name": "NL2SQL 기반 MCP DB 조회",
+      "description": "사용자 질문을 SELECT SQL로 변환한 뒤 MCP PostgreSQL Tool의 execute_select_query를 통해 조회하고, MCP 연결 실패 시 기존 execute_query 방식으로 fallback한다."
+    }
+  ],
+  "handoff": {
+    "next_agents": [
+      "financial_agent",
+      "product_agent",
+      "eligibility_agent",
+      "recommend_agent",
+      "validation_agent",
+      "supervisor"
+    ],
+    "state_contract": "고객 조회 결과는 customer_result와 agent_outputs.customer_agent에 저장하며, DB 조회는 NL2SQL → MCP execute_select_query → PostgreSQL 흐름을 우선 사용하고 실패 시 기존 DB 직접 조회로 fallback한다."
+  }
+}

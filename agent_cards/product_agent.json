@@ -1,0 +1,53 @@
+{
+  "name": "product_agent",
+  "description": "상품 설명서/약관 PDF RAG를 통해 예적금 상품 조건과 근거를 검색하는 Agent",
+  "version": "1.0.0",
+  "input_state_keys": [
+    "user_query",
+    "member_id",
+    "customer_id",
+    "messages",
+    "agent_outputs",
+    "customer_result"
+  ],
+  "output_state_keys": [
+    "product_result",
+    "product_candidates",
+    "agent_outputs.product_agent",
+    "messages",
+    "current_step",
+    "current_agent",
+    "completed_agents"
+  ],
+  "tools": [
+    "PRODUCT_TOOLS",
+    "rag_retriever"
+  ],
+  "skills": [
+    {
+      "id": "product_rag_search",
+      "name": "상품 약관 RAG 검색",
+      "description": "상품 설명서와 약관 PDF에서 가입 대상, 우대금리 조건, 제한 조건, 유의사항, 중도해지 관련 내용을 검색한다."
+    },
+    {
+      "id": "product_condition_extraction",
+      "name": "상품 조건 추출",
+      "description": "RAG 검색 결과에서 상품명, 금리, 가입 기간, 가입 금액, 우대조건 등 후속 Agent가 활용할 상품 후보 정보를 추출한다."
+    },
+    {
+      "id": "product_candidates_building",
+      "name": "상품 후보 생성",
+      "description": "검색된 상품 정보를 product_candidates로 구조화하여 Eligibility, Financial, Recommend Agent가 활용할 수 있도록 제공한다."
+    }
+  ],
+  "handoff": {
+    "next_agents": [
+      "financial_agent",
+      "eligibility_agent",
+      "recommend_agent",
+      "validation_agent",
+      "supervisor"
+    ],
+    "state_contract": "상품 검색 결과는 product_result와 agent_outputs.product_agent에 저장하고, 추출된 상품 후보는 product_candidates에 저장한다."
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "name": "financial_agent",
+  "description": "고객 계좌 정보와 상품 조건을 기반으로 만기, 납입 현황, 이자, 중도해지 손실, 갈아타기 유불리를 계산하는 Agent",
+  "version": "1.0.0",
+  "input_state_keys": [
+    "user_query",
+    "member_id",
+    "customer_id",
+    "messages",
+    "agent_outputs",
+    "customer_result",
+    "product_result",
+    "product_candidates",
+    "task_type"
+  ],
+  "output_state_keys": [
+    "financial_result",
+    "agent_outputs.financial_agent",
+    "messages",
+    "current_step",
+    "current_agent",
+    "completed_agents",
+    "errors"
+  ],
+  "tools": [
+    "FINANCIAL_TOOLS",
+    "compare_switch_benefit"
+  ],
+  "skills": [
+    {
+      "id": "maturity_and_payment_status",
+      "name": "만기 및 납입 현황 계산",
+      "description": "고객의 가입 계좌 정보를 기반으로 만기일, 남은 기간, 납입 회차, 현재 잔액을 계산한다."
+    },
+    {
+      "id": "interest_calculation",
+      "name": "예상 이자 계산",
+      "description": "예금 및 적금의 가입 금액, 기간, 적용 금리를 기반으로 예상 이자를 계산한다."
+    },
+    {
+      "id": "early_termination_analysis",
+      "name": "중도해지 손실 분석",
+      "description": "현재 해지 시 예상 수령액과 만기 유지 시 예상 수령액을 비교해 손실 여부를 분석한다."
+    },
+    {
+      "id": "switch_analysis",
+      "name": "상품 갈아타기 분석",
+      "description": "기존 상품 유지와 신규 상품 가입 시 예상 이익을 비교해 갈아타기 유불리를 판단한다."
+    }
+  ],
+  "handoff": {
+    "next_agents": [
+      "eligibility_agent",
+      "recommend_agent",
+      "validation_agent",
+      "supervisor"
+    ],
+    "state_contract": "계산 결과는 financial_result와 agent_outputs.financial_agent에 저장한다."
+  }
+}

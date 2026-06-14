@@ -1,0 +1,67 @@
+{
+  "name": "validation_agent",
+  "description": "각 Agent의 구조화 결과를 검증하고 추천 결과의 누락, 모순, 부적절성을 점검하는 Agent",
+  "version": "1.0.0",
+  "input_state_keys": [
+    "user_query",
+    "member_id",
+    "customer_id",
+    "messages",
+    "task_type",
+    "plan",
+    "current_step",
+    "current_agent",
+    "completed_agents",
+    "agent_outputs",
+    "customer_result",
+    "product_result",
+    "financial_result",
+    "eligibility_result",
+    "recommend_result",
+    "eligibility_results",
+    "recommendation_results",
+    "financial_results",
+    "errors"
+  ],
+  "output_state_keys": [
+    "validation_result",
+    "agent_outputs.validation_agent",
+    "current_step",
+    "current_agent",
+    "completed_agents"
+  ],
+  "tools": [
+    "build_validation_context",
+    "run_validation_checks",
+    "build_rule_based_verify_result",
+    "llm_validator"
+  ],
+  "skills": [
+    {
+      "id": "agent_output_completeness_check",
+      "name": "Agent 결과 완전성 검증",
+      "description": "Supervisor plan에 포함된 Agent들이 필요한 결과를 State에 남겼는지 확인한다."
+    },
+    {
+      "id": "plan_completion_check",
+      "name": "실행 계획 완료 여부 검증",
+      "description": "plan에 포함된 Agent들이 completed_agents에 기록되었는지 확인한다."
+    },
+    {
+      "id": "recommendation_consistency_check",
+      "name": "추천 결과 일관성 검증",
+      "description": "가입 불가능 상품 추천, 우대조건 오판, 상품 조건 누락, 고객 조건과의 불일치 여부를 점검한다."
+    },
+    {
+      "id": "rag_grounding_check",
+      "name": "RAG 근거 기반 검증",
+      "description": "상품 설명, 우대조건, 가입 제한, 중도해지 관련 답변이 상품 근거와 모순되지 않는지 확인한다."
+    }
+  ],
+  "handoff": {
+    "next_agents": [
+      "supervisor"
+    ],
+    "state_contract": "검증 결과는 validation_result와 agent_outputs.validation_agent에 저장한다."
+  }
+}
