@@ -56,6 +56,20 @@ class AgentState(TypedDict, total=False):
     eligibility_result: Optional[dict[str, Any]]
     recommend_result: Optional[dict[str, Any]]
 
+    ## 오류로 인해 추가 
+    # 5-1. Agent 간 handoff용 세부 구조화 결과
+    # Product Agent → Eligibility Agent
+    product_candidates: Optional[list[dict[str, Any]]]
+    # Eligibility Agent → Recommend Agent
+    eligibility_results: Optional[list[dict[str, Any]]]
+    # Financial Agent / Recommend Agent에서 활용하는 계산 결과
+    financial_results: Optional[list[dict[str, Any]]]
+    # Recommend Agent → Validation / Supervisor
+    recommendation_results: Optional[list[dict[str, Any]]]
+    # Eligibility / Recommend에서 재사용하는 고객 파싱 결과
+    customer_profile: Optional[dict[str, Any]]
+    customer_accounts: Optional[list[dict[str, Any]]]
+
     # 6. Validation 관련 결과
     validation_result: Optional[dict[str, Any]]
 
