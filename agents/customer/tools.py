@@ -9,7 +9,10 @@ import re
 from langchain_core.tools import tool
 from langchain_core.messages import SystemMessage, HumanMessage
 
+import os
+
 from db.postgres_db import DB_SCHEMA, execute_query
+from mcp_servers.postgres_mcp_client import call_postgres_mcp_tool
 from config.settings import get_llm
 
 
