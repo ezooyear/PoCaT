@@ -22,8 +22,8 @@ Validation Agent 검증 도구
 """
 
 from typing import Any
-
 from graph.state import AgentState
+from agent_cards.loader import validate_agent_outputs_by_card
 
 
 REQUIRED_RESULT_KEYS = ["status", "result", "evidence", "error"]
@@ -137,6 +137,20 @@ def validate_recorded_errors(state: AgentState) -> list[str]:
 
     return [f"이전 Agent 실행 중 errors가 기록되어 있습니다: {errors}"]
 
+# a2a
+def validate_a2a_card_contract(state: AgentState) -> list[str]:
+    """
+    A2A Agent Card에 정의된 output_state_keys가 실제 State에 남았는지 검증합니다.
+
+    주의:
+    - validation_agent는 실행 중 자기 결과가 아직 저장되기 전이므로 loader에서 제외합니다.
+    - Agent Card 파일 오류가 있어도 Validation Agent 전체가 죽지 않도록 warning 형태로 반환합니다.
+    """
+    try:
+        return validate_agent_outputs_by_card(dict(state))
+    except Exception as e:
+        return [f"A2A Agent Card 계약 검증 중 오류가 발생했습니다: {str(e)}"]
+
 
 def validate_recommendation_consistency(state: AgentState) -> list[str]:
     """
@@ -212,7 +226,7 @@ def extract_product_names(products: list[Any]) -> list[str]:
 
     return names
 
-
+# a2a로 수정 
 def run_validation_checks(state: AgentState) -> tuple[list[str], dict[str, bool]]:
     """Validation Agent에서 수행할 전체 검증을 실행합니다."""
     issues = []
@@ -222,12 +236,14 @@ def run_validation_checks(state: AgentState) -> tuple[list[str], dict[str, bool]
     plan_completion_issues = validate_plan_completion(state)
     recorded_error_issues = validate_recorded_errors(state)
     recommendation_issues = validate_recommendation_consistency(state)
+    a2a_card_contract_issues = validate_a2a_card_contract(state)
 
     issues.extend(common_format_issues)
     issues.extend(required_result_issues)
     issues.extend(plan_completion_issues)
     issues.extend(recorded_error_issues)
     issues.extend(recommendation_issues)
+    issues.extend(a2a_card_contract_issues)
 
     checked_items = {
         "common_format_checked": True,
@@ -235,7 +251,7 @@ def run_validation_checks(state: AgentState) -> tuple[list[str], dict[str, bool]
         "plan_completion_checked": True,
         "recorded_errors_checked": True,
         "recommendation_consistency_checked": True,
-
+        "a2a_card_contract_checked": True,
         # 팀원 Agent 결과 구조 확정 후 보강 예정
         "condition_conflict_checked": False,
         "rate_amount_payment_checked": False,

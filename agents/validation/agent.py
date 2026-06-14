@@ -207,6 +207,7 @@ def _parse_json_response(text: str) -> dict[str, Any]:
                 "rate_amount_payment_checked": False,
                 "rag_evidence_checked": False,
                 "inappropriate_recommendation_checked": False,
+                "a2a_card_contract_checked": True,
             },
             "final_notes": [
                 "검증 결과 형식이 불안정하므로 최종 답변에서 실제 금리, 가입 조건, 약관 확인 안내가 필요합니다."
@@ -259,6 +260,7 @@ def _normalize_verify_result(data: dict[str, Any]) -> dict[str, Any]:
         "plan_completion_checked": True,
         "recorded_errors_checked": True,
         "recommendation_consistency_checked": True,
+        "a2a_card_contract_checked": True,
         "condition_conflict_checked": False,
         "rate_amount_payment_checked": False,
         "rag_evidence_checked": False,
