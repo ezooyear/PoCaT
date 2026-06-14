@@ -19,7 +19,6 @@
   "output_state_keys": [
     "recommend_result",
     "recommendation_results",
-    "financial_results",
     "agent_outputs.recommend_agent",
     "messages",
     "current_step",
