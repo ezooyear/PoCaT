@@ -4,6 +4,7 @@
 """
 import streamlit as st
 from dotenv import load_dotenv
+import re
 
 load_dotenv()
 
@@ -83,22 +84,6 @@ if "graph" not in st.session_state:
 if "conversation_messages" not in st.session_state:
     st.session_state.conversation_messages = []
 
-
-def _build_next_conversation(messages: list, latest_user_prompt: str, latest_ai_content: str) -> list[tuple[str, str]]:
-    """다음 턴에 넘길 최소 대화 히스토리만 유지합니다."""
-    preserved = []
-
-    for msg in messages:
-        role = msg.get("role")
-        content = msg.get("content")
-        if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
-            preserved.append((role, content))
-
-    # 화면 표시용 히스토리가 이미 최신 상태이므로 현재 턴도 그대로 반영합니다.
-    preserved.append(("user", latest_user_prompt))
-    preserved.append(("assistant", latest_ai_content))
-    return preserved
-
 # ─── 기존 대화 히스토리 표시 ───
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖"):
@@ -115,17 +100,42 @@ if prompt := st.chat_input("궁금한 점을 입력하세요..."):
     st.session_state.conversation_messages.append(("user", prompt))
 
     # AI 응답 생성
+    # 이유는 모르겠는데 채팅에서 고객id를 추출하지 못함 -> 수정코드.
     with st.chat_message("assistant", avatar="🤖"):
         with st.spinner("답변을 생성하고 있습니다..."):
             try:
+                # 로그인 UI가 아직 없으므로, 질문 문장에서 고객 ID를 임시 추출
+                customer_id = st.session_state.get("customer_id")
+
+                if customer_id is None:
+                                    match = re.search(r"고객\s*(\d+)|(\d+)\s*번\s*고객", prompt)
+                                    if match:
+                                        customer_id = int(match.group(1) or match.group(2))
+                                        st.session_state.customer_id = customer_id
+
+                member_id = st.session_state.get("member_id")
+                if member_id is None and customer_id is not None:
+                    member_id = str(customer_id)
+                    st.session_state.member_id = member_id
+
                 result = st.session_state.graph.invoke({
                     "messages": st.session_state.conversation_messages,
                     "next": "",
-                    "member_id": None,
+                    "member_id": member_id,
+                    "customer_id": customer_id,
+                    "user_query": prompt,
                     "context": None,
                     "plan": [],
                     "current_step": 0,
+                    "current_agent": "",
+                    "completed_agents": [],
                     "agent_outputs": {},
+                    "product_candidates": [],
+                    "eligibility_results": [],
+                    "financial_results": [],
+                    "recommendation_results": [],
+                    "customer_profile": None,
+                    "customer_accounts": [],
                 })
 
                 # AI 응답 추출
@@ -137,15 +147,36 @@ if prompt := st.chat_input("궁금한 점을 입력하세요..."):
 
                 st.markdown(ai_content)
 
+                # 디버그용 상태 출력(확인용으로 추후 삭제 !!)
+                with st.expander("DEBUG: 실행 State 확인"):
+                    st.write("plan:", result.get("plan"))
+                    st.write("completed_agents:", result.get("completed_agents"))
+                    st.write("current_agent:", result.get("current_agent"))
+                    st.write("current_step:", result.get("current_step"))
+                    st.write("agent_outputs keys:", list((result.get("agent_outputs") or {}).keys()))
+                    st.write("validation_result:", result.get("validation_result"))
+                    st.write("final_answer:", result.get("final_answer"))
+                    st.write("product_candidates:", result.get("product_candidates"))
+                    st.write("eligibility_results:", result.get("eligibility_results"))
+                    st.write("recommendation_results:", result.get("recommendation_results"))
+                    st.write("product_result:", result.get("product_result"))
+                    st.write("customer_id:", result.get("customer_id"))
+                    st.write("member_id:", result.get("member_id"))
+                    st.write("customer_result:", result.get("customer_result"))
+                    st.write("customer_profile:", result.get("customer_profile"))
+                    st.write("customer_accounts:", result.get("customer_accounts"))
+                    st.write("agent_outputs.customer_agent:", (result.get("agent_outputs") or {}).get("customer_agent"))
+
+
+                # 대화 히스토리 갱신
+                st.session_state.conversation_messages = [
+                    (msg.type if hasattr(msg, "type") else "user",
+                     msg.content if hasattr(msg, "content") else str(msg))
+                    for msg in result["messages"]
+                ]
+
                 # 화면 표시용 메시지 저장
                 st.session_state.messages.append({"role": "assistant", "content": ai_content})
-
-                # 다음 턴에는 내부 agent 메시지를 제외한 사용자/최종 답변만 전달합니다.
-                st.session_state.conversation_messages = _build_next_conversation(
-                    st.session_state.messages[:-2],
-                    prompt,
-                    ai_content,
-                )
 
             except Exception as e:
                 error_msg = f"❌ 오류가 발생했습니다: {e}"
