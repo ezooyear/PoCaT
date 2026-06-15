@@ -125,6 +125,10 @@ DB_PORT=5432
 DB_NAME=postgres
 DB_USER=postgres
 DB_PASSWORD=your_db_password
+
+# mcp
+USE_MCP_DB=true
+MCP_POSTGRES_URL=http://localhost:8000/mcp
 ```
 
 ### 3. Vector DB 구축 (최초 1회)
@@ -133,12 +137,30 @@ DB_PASSWORD=your_db_password
 python scripts/build_vectorstore.py
 ```
 
-### 4. Streamlit 웹 앱 실행
+### 4. MCP 서버 실행
+첫 번째 터미널에서 아래 명령어를 실행합니다.
+```bash
+python -m mcp_servers.postgres_mcp_server
+```
+정상 실행되면 다음과 유사한 로그가 출력됩니다.
+```bash
+INFO:     Started server process
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000
+```
+이 터미널은 MCP 서버가 실행 중인 상태로 유지해야 합니다.
+
+### 5. Streamlit 웹 앱 실행
 ```bash
 streamlit run app.py
 ```
 
 ---
+
+### +) A2A 서버 실행 시 
+```bash
+python -m a2a_servers.pocat_a2a_server
+```
 
 ## ✅ 구현 단계 (Roadmap)
 - [x] Phase 1: 기본 챗봇 기반 마련 및 환경 설정
@@ -149,3 +171,4 @@ streamlit run app.py
 - [x] Phase 6: 에이전트 역할 세분화 (6개 에이전트) 및 도구 특화 적용
 - [x] Phase 7: Customer Agent 신설, 에이전트별 디렉토리 구조 리팩터링, Supervisor 통제형 A2A 협업 루프 도입
 - [x] Phase 8: 상품 정보 RAG 전용화(DB SQL 조회 차단), 루트 tools 폴더 삭제 및 customer_agent 내부 캡슐화 완료
+
