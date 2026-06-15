@@ -27,6 +27,7 @@ from langchain_core.messages import SystemMessage, AIMessage
 
 from config.settings import get_llm
 from graph.state import AgentState
+from observability.langfuse import langfuse_observation, update_observation
 from agents.supervisor.prompts import (
     SUPERVISOR_PLAN_PROMPT,
     SUPERVISOR_SYNTHESIZE_PROMPT,
@@ -880,3 +881,35 @@ def _clean_text(text: str) -> str:
         .replace("<br />", "\n")
         .strip()
     )
+
+
+_original_supervisor_node = supervisor_node
+
+
+def supervisor_node(state: AgentState) -> dict:
+    plan = state.get("plan") or []
+    mode = "plan" if not plan else "synthesize"
+
+    with langfuse_observation(
+        name="supervisor",
+        as_type="span",
+        input={
+            "mode": mode,
+            "task_type": state.get("task_type"),
+            "message_count": len(state.get("messages") or []),
+        },
+        metadata={"agent": "supervisor", "mode": mode},
+    ) as observation:
+        result = _original_supervisor_node(state)
+        update_observation(
+            observation,
+            output={
+                "mode": mode,
+                "task_type": result.get("task_type", state.get("task_type")),
+                "next": result.get("next"),
+                "plan": result.get("plan", state.get("plan")),
+                "completed_agents": result.get("completed_agents", state.get("completed_agents") or []),
+                "final_answer_preview": str(result.get("final_answer") or "")[:500],
+            },
+        )
+        return result

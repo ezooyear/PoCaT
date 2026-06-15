@@ -9,7 +9,10 @@ import re
 from langchain_core.tools import tool
 from langchain_core.messages import SystemMessage, HumanMessage
 
+import os
+
 from db.postgres_db import DB_SCHEMA, execute_query
+from mcp_servers.postgres_mcp_client import call_postgres_mcp_tool
 from config.settings import get_llm
 
 
@@ -75,6 +78,14 @@ def _validate_select_sql(sql: str) -> None:
         raise ValueError("여러 SQL 문장을 한 번에 실행할 수 없습니다.")
 
 
+# mcp 추가
+"""
+Customer Agent
+→ NL2SQL
+→ MCP Tool execute_select_query
+→ db.postgres_db.execute_query
+→ PostgreSQL 의 흐름 
+"""
 def _nl2sql_query(question: str) -> str:
     """
     고객 데이터베이스용 NL2SQL 내부 함수
@@ -90,6 +101,24 @@ def _nl2sql_query(question: str) -> str:
     sql = _clean_sql(response.content)
 
     _validate_select_sql(sql)
+
+    use_mcp = os.getenv("USE_MCP_DB", "true").lower() == "true"
+
+    if use_mcp:
+        try:
+            return call_postgres_mcp_tool(
+                "execute_select_query",
+                {
+                    "sql": sql,
+                    "max_rows": 50,
+                },
+            )
+        except Exception as e:
+            # MCP 서버가 꺼져 있거나 연결 실패 시 기존 DB 직접 조회로 fallback
+            return (
+                f"⚠️ MCP DB 조회 실패로 기존 DB 조회로 fallback합니다: {str(e)}\n\n"
+                + execute_query(sql)
+            )
 
     return execute_query(sql)
 

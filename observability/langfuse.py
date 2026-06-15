@@ -5,6 +5,7 @@ Keeps observability optional and initializes the client lazily.
 
 from __future__ import annotations
 
+import json
 import os
 from contextlib import contextmanager
 from typing import Any
@@ -38,6 +39,52 @@ def _clean_metadata(metadata: Any) -> dict[str, str]:
         cleaned[normalized_key] = str(value)[:200]
 
     return cleaned
+
+
+def summarize_for_langfuse(value: Any, *, max_length: int = 800) -> Any:
+    if value is None:
+        return None
+
+    if isinstance(value, (bool, int, float)):
+        return value
+
+    if isinstance(value, str):
+        return value[:max_length]
+
+    if isinstance(value, dict):
+        summarized: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= 20:
+                summarized["_truncated"] = True
+                break
+            summarized[str(key)[:80]] = summarize_for_langfuse(item, max_length=max_length)
+        return summarized
+
+    if isinstance(value, (list, tuple)):
+        summarized_items = [
+            summarize_for_langfuse(item, max_length=max_length)
+            for item in list(value)[:10]
+        ]
+        if len(value) > 10:
+            summarized_items.append({"_truncated": True, "original_count": len(value)})
+        return summarized_items
+
+    return str(value)[:max_length]
+
+
+def _serialize_preview(value: Any, *, max_length: int = 800) -> str:
+    summarized = summarize_for_langfuse(value, max_length=max_length)
+
+    if summarized is None:
+        return ""
+
+    if isinstance(summarized, str):
+        return summarized[:max_length]
+
+    try:
+        return json.dumps(summarized, ensure_ascii=False)[:max_length]
+    except Exception:
+        return str(summarized)[:max_length]
 
 
 def is_langfuse_enabled() -> bool:
@@ -139,16 +186,59 @@ def langfuse_observation(
         return
 
     try:
-        with client.start_as_current_observation(
+        observation_context = client.start_as_current_observation(
             name=name,
             as_type=as_type,
             input=input,
             output=output,
             metadata=metadata,
-        ) as observation:
-            yield observation
+        )
     except Exception:
         yield None
+        return
+
+    with observation_context as observation:
+        yield observation
+
+
+def update_observation(
+    observation: Any,
+    *,
+    input: Any = None,
+    output: Any = None,
+    metadata: Any = None,
+) -> None:
+    if observation is None:
+        return
+
+    payload: dict[str, Any] = {}
+
+    if input is not None:
+        payload["input"] = _serialize_preview(input)
+    if output is not None:
+        payload["output"] = _serialize_preview(output)
+    if metadata is not None:
+        payload["metadata"] = summarize_for_langfuse(metadata)
+
+    existing_metadata = payload.get("metadata")
+    if not isinstance(existing_metadata, dict):
+        existing_metadata = {}
+
+    if input is not None:
+        existing_metadata["debug_input_preview"] = _serialize_preview(input)
+    if output is not None:
+        existing_metadata["debug_output_preview"] = _serialize_preview(output)
+
+    if existing_metadata:
+        payload["metadata"] = existing_metadata
+
+    if not payload:
+        return
+
+    try:
+        observation.update(**payload)
+    except Exception:
+        pass
 
 
 def flush_langfuse() -> None:
