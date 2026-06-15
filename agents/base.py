@@ -8,7 +8,7 @@ from langchain_core.messages import SystemMessage, ToolMessage
 
 from config.settings import get_llm
 from graph.state import AgentState
-from observability.langfuse import langfuse_observation
+from observability.langfuse import langfuse_observation, update_observation
 
 
 def make_agent_result(
@@ -72,7 +72,7 @@ def run_agent_loop(
             "message_count": len(state.get("messages") or []),
         },
         metadata={"agent": output_key},
-    ):
+    ) as observation:
         llm = get_llm()
         llm_with_tools = llm.bind_tools(tools)
 
@@ -143,6 +143,22 @@ def run_agent_loop(
             },
             evidence=tool_results,
             error=error,
+        )
+
+        update_observation(
+            observation,
+            output={
+                "status": status,
+                "summary_preview": summary[:500] if isinstance(summary, str) else str(summary)[:500],
+                "tool_count": len(tool_results),
+                "tool_names": [item.get("tool_name") for item in tool_results[:10]],
+                "tool_error_count": len(tool_errors),
+            },
+            metadata={
+                "agent": output_key,
+                "status": status,
+                "has_tool_errors": bool(tool_errors),
+            },
         )
 
     outputs = dict(state.get("agent_outputs") or {})
