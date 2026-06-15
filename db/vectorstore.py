@@ -87,10 +87,10 @@ def build_vectorstore():
 
     print(f"📝 총 {len(all_documents)}페이지 로드 완료")
 
-    # 1단계: 부모 청크 분할 (상세 컨텍스트 유지용 - 1000자)
+    # 1단계: 부모 청크 분할 (상세 컨텍스트 유지용 - 1200자, 정보 유실 방지)
     parent_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
+        chunk_size=1200,
+        chunk_overlap=300,
         separators=["\n\n", "\n", ".", " ", ""],
     )
     parent_docs = parent_splitter.split_documents(all_documents)
@@ -183,8 +183,8 @@ def search_products(query: str, k: int = 3) -> List[Document]:
     if not all_docs:
         return []
 
-    # 2. 1차 후보군 추출 개수 설정 (최대 후보 15개)
-    candidates_limit = max(k * 4, 15)
+    # 2. 1차 후보군 추출 개수 설정 (최대 후보 25개, k 배수 확장)
+    candidates_limit = max(k * 6, 25)
 
     # 3. Dense 검색 (유사도 검색)
     dense_results = vectorstore.similarity_search(query, k=candidates_limit)
@@ -192,22 +192,30 @@ def search_products(query: str, k: int = 3) -> List[Document]:
     # 4. Sparse 검색 (BM25 검색)
     sparse_results = _search_sparse_with_bm25(all_docs, query, candidates_limit)
 
-    # 5. 하이브리드 결과 병합 및 자식 청크 수준 중복 제거
-    seen_ids = set()
-    combined_candidates = []
+    # 5. 하이브리드 결과 병합 및 자식 청크 수준 중복 제거 (RRF - Reciprocal Rank Fusion 적용)
+    rrf_scores = {}
+    doc_map = {}
     
-    # 두 결과를 교대로 섞어서 순위 가중치 보완 (RRF 느낌의 교차 병합)
-    for d_doc, s_doc in zip(dense_results + [None] * len(sparse_results), sparse_results + [None] * len(dense_results)):
-        if d_doc and d_doc.page_content not in seen_ids:
-            seen_ids.add(d_doc.page_content)
-            combined_candidates.append(d_doc)
-        if s_doc and s_doc.page_content not in seen_ids:
-            seen_ids.add(s_doc.page_content)
-            combined_candidates.append(s_doc)
+    # Dense 결과 가중치 계산
+    for rank, doc in enumerate(dense_results):
+        if doc and doc.page_content:
+            content = doc.page_content
+            rrf_scores[content] = rrf_scores.get(content, 0.0) + 1.0 / (60 + rank)
+            doc_map[content] = doc
 
-    combined_candidates = [c for c in combined_candidates if c is not None]
-    if not combined_candidates:
+    # Sparse 결과 가중치 계산
+    for rank, doc in enumerate(sparse_results):
+        if doc and doc.page_content:
+            content = doc.page_content
+            rrf_scores[content] = rrf_scores.get(content, 0.0) + 1.0 / (60 + rank)
+            doc_map[content] = doc
+
+    if not rrf_scores:
         return []
+
+    # RRF 점수 기준 정렬
+    sorted_contents = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+    combined_candidates = [doc_map[content] for content, _ in sorted_contents]
 
     # 6. Cross-Encoder 리랭킹 (Reranker)
     reranker = _get_reranker()
