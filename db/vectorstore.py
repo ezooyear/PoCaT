@@ -184,7 +184,7 @@ def search_products(query: str, k: int = 3) -> List[Document]:
         return []
 
     # 2. 1차 후보군 추출 개수 설정 (최대 후보 15개)
-    candidates_limit = max(k * 4, 15)
+    candidates_limit = max(k * 3, 9)
 
     # 3. Dense 검색 (유사도 검색)
     dense_results = vectorstore.similarity_search(query, k=candidates_limit)

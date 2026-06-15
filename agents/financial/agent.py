@@ -1,28 +1,32 @@
 """
-Financial 에이전트 - 이자 계산, 만기, 납입, 중도해지, 비교, 갈아타기
+Financial agent - interest, maturity, early termination, switch analysis.
 """
+from __future__ import annotations
 
 import re
 from datetime import date, datetime
 from typing import Any
 
-from graph.state import AgentState
 from agents.base import run_agent_loop
 from agents.financial.prompts import FINANCIAL_SYSTEM_PROMPT
 from agents.financial.tools import FINANCIAL_TOOLS, compare_switch_benefit
+from graph.state import AgentState
 
 
 def financial_agent_node(state: AgentState) -> dict:
+    task_type = state.get("task_type")
+    max_iterations = 2 if task_type in {"financial_analysis", "switch_analysis", "early_termination"} else 1
+
     result = run_agent_loop(
         state=state,
         system_prompt=FINANCIAL_SYSTEM_PROMPT,
         tools=FINANCIAL_TOOLS,
         output_key="financial_agent",
-        result_key="financial_result", # 추가 : validation에서 활용
-        max_iterations=5,
+        result_key="financial_result",
+        max_iterations=max_iterations,
     )
 
-    if state.get("task_type") == "switch_analysis":
+    if task_type == "switch_analysis":
         result = _augment_switch_analysis_result(state, result)
 
     return result
@@ -89,12 +93,7 @@ def _augment_switch_analysis_result(state: AgentState, result: dict) -> dict:
         }
     )
     payload["tool_results"] = tool_results
-
-    summary = str(payload.get("summary") or "")
-    if _looks_like_missing_info_summary(summary):
-        payload["summary"] = switch_result
-    else:
-        payload["summary"] = f"{summary}\n\n{switch_result}".strip()
+    payload["summary"] = switch_result
 
     financial_result["result"] = payload
     result["financial_result"] = financial_result
@@ -136,21 +135,37 @@ def _pick_current_account(accounts_text: str, user_query: str) -> dict[str, Any]
     if not rows:
         return None
 
-    query = user_query.replace(" ", "")
-    active_rows = [row for row in rows if str(row.get("account_status", "")).upper() == "ACTIVE"]
-    candidates = active_rows or rows
+    query = re.sub(r"\s+", "", user_query)
+    candidates = rows
 
     if "적금" in query:
-        savings = [row for row in candidates if "적금" in str(row.get("product_type", "")) or "적금" in str(row.get("product_name", ""))]
+        savings = [
+            row for row in candidates
+            if "적금" in str(row.get("product_type", "")) or "적금" in str(row.get("product_name", ""))
+        ]
         if savings:
             candidates = savings
     elif "예금" in query:
-        deposits = [row for row in candidates if "예금" in str(row.get("product_type", "")) or "예금" in str(row.get("product_name", ""))]
+        deposits = [
+            row for row in candidates
+            if "예금" in str(row.get("product_type", "")) or "예금" in str(row.get("product_name", ""))
+        ]
         if deposits:
             candidates = deposits
 
-    candidates.sort(key=lambda row: _to_int(row.get("current_balance")) or 0, reverse=True)
-    return candidates[0] if candidates else None
+    active_rows = [row for row in candidates if str(row.get("account_status", "")).upper() == "ACTIVE"]
+    matured_rows = [row for row in candidates if str(row.get("account_status", "")).upper() == "MATURED"]
+    ordered = active_rows or matured_rows or candidates
+
+    ordered.sort(
+        key=lambda row: (
+            1 if str(row.get("account_status", "")).upper() == "ACTIVE" else 0,
+            _to_int(row.get("current_balance")) or 0,
+            _to_int(row.get("monthly_amount")) or 0,
+        ),
+        reverse=True,
+    )
+    return ordered[0] if ordered else None
 
 
 def _pick_target_product(product_candidates: list[dict[str, Any]], user_query: str) -> dict[str, Any] | None:
@@ -158,15 +173,31 @@ def _pick_target_product(product_candidates: list[dict[str, Any]], user_query: s
         return None
 
     query = re.sub(r"\s+", "", user_query).lower()
+
+    explicit_matches = []
     for candidate in product_candidates:
         name = str(candidate.get("product_name", ""))
         normalized = re.sub(r"\s+", "", name).lower()
         if normalized and normalized in query:
-            return _enrich_product_candidate(candidate)
+            explicit_matches.append(candidate)
+
+    if explicit_matches:
+        explicit_matches.sort(key=lambda item: len(str(item.get("product_name", ""))), reverse=True)
+        return _enrich_product_candidate(explicit_matches[0])
+
+    if "일반정기적금" in query:
+        for candidate in product_candidates:
+            if "일반정기적금" in str(candidate.get("product_name", "")):
+                return _enrich_product_candidate(candidate)
 
     if "적금" in query:
         for candidate in product_candidates:
             if "적금" in str(candidate.get("product_name", "")):
+                return _enrich_product_candidate(candidate)
+
+    if "예금" in query:
+        for candidate in product_candidates:
+            if "예금" in str(candidate.get("product_name", "")):
                 return _enrich_product_candidate(candidate)
 
     return _enrich_product_candidate(product_candidates[0])
@@ -193,12 +224,20 @@ def _parse_table_rows(table_text: str) -> list[dict[str, str]]:
     for line in lines:
         if "|" not in line:
             continue
+
         parts = [part.strip() for part in line.split("|")]
+        if parts and parts[0] == "":
+            parts = parts[1:]
+        if parts and parts[-1] == "":
+            parts = parts[:-1]
+
         if not header and "customer_id" in line.lower():
             header = parts
             continue
-        if header and set(line) == {"-"}:
+
+        if header and all(part and set(part) <= {"-", ":"} for part in parts):
             continue
+
         if header and len(parts) == len(header):
             rows.append(dict(zip(header, parts)))
 
@@ -242,14 +281,3 @@ def _to_float(value: Any) -> float | None:
     if not match:
         return None
     return float(match.group(0))
-
-
-def _looks_like_missing_info_summary(summary: str) -> bool:
-    missing_markers = [
-        "정보가 부족",
-        "판단하기 어렵",
-        "구체적인 정보가 없",
-        "알려 주시면",
-        "비교해 드릴 수 있습니다",
-    ]
-    return any(marker in summary for marker in missing_markers)

@@ -12,7 +12,7 @@ from agents.recommend.tools import (
     parse_financial_results,
 )
 from graph.state import AgentState
-from observability.langfuse import langfuse_observation
+from observability.langfuse import langfuse_observation, update_observation
 
 
 def recommend_agent_node(state: AgentState) -> dict:
@@ -21,7 +21,7 @@ def recommend_agent_node(state: AgentState) -> dict:
         as_type="span",
         input={"task_type": state.get("task_type")},
         metadata={"agent": "recommend_agent"},
-    ):
+    ) as observation:
         agent_outputs = dict(state.get("agent_outputs") or {})
 
         eligibility_results = state.get("eligibility_results") or []
@@ -71,7 +71,15 @@ def recommend_agent_node(state: AgentState) -> dict:
                 financial_results = parse_financial_results(financial_results)
 
         classified = classify_eligibility_results(eligibility_results)
-        recommendations = build_recommendations(classified["recommendable"], financial_results)
+        customer_profile = state.get("customer_profile")
+        if not isinstance(customer_profile, dict):
+            customer_profile = None
+
+        recommendations = build_recommendations(
+            classified["recommendable"],
+            financial_results,
+            customer_profile=customer_profile,
+        )
         summary = build_recommendation_summary(
             recommendations,
             classified["needs_check"],
@@ -88,11 +96,43 @@ def recommend_agent_node(state: AgentState) -> dict:
                 "needs_check_products": classified.get("needs_check", []),
                 "rejected_products": classified.get("rejected", []),
                 "financial_results": financial_results,
+                "customer_profile": customer_profile,
             },
             evidence=recommendations,
             error=None,
         )
         agent_outputs["recommend_agent"] = recommend_result
+
+        update_observation(
+            observation,
+            output={
+                "summary_preview": summary[:500],
+                "recommendation_count": len(recommendations),
+                "top_recommendations": [
+                    {
+                        "product_name": item.get("product_name"),
+                        "score": item.get("score"),
+                        "reason": (item.get("reason") or "")[:200],
+                    }
+                    for item in recommendations[:5]
+                    if isinstance(item, dict)
+                ],
+                "needs_check_products": [
+                    item.get("product_name")
+                    for item in classified.get("needs_check", [])[:5]
+                    if isinstance(item, dict)
+                ],
+                "rejected_products": [
+                    item.get("product_name")
+                    for item in classified.get("rejected", [])[:5]
+                    if isinstance(item, dict)
+                ],
+            },
+            metadata={
+                "agent": "recommend_agent",
+                "task_type": state.get("task_type"),
+            },
+        )
 
         completed_agents = list(state.get("completed_agents") or [])
         if "recommend_agent" not in completed_agents:

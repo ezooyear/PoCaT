@@ -13,6 +13,7 @@ from observability.langfuse import (
     flush_langfuse,
     langfuse_observation,
     langfuse_trace_context,
+    update_observation,
 )
 
 
@@ -134,17 +135,19 @@ if prompt := st.chat_input("궁금한 점을 입력해 주세요..."):
                             }
                         )
 
-                ai_message = result["messages"][-1]
-                ai_content = ai_message.content if hasattr(ai_message, "content") else str(ai_message)
-                ai_content = ai_content.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+                        ai_message = result["messages"][-1]
+                        ai_content = ai_message.content if hasattr(ai_message, "content") else str(ai_message)
+                        ai_content = ai_content.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
 
-                if observation is not None:
-                    observation.update(
-                        output={
-                            "response_preview": ai_content[:500],
-                            "message_count": len(result.get("messages") or []),
-                        }
-                    )
+                        update_observation(
+                            observation,
+                            output={
+                                "response_preview": ai_content[:500],
+                                "message_count": len(result.get("messages") or []),
+                                "current_agent": result.get("current_agent"),
+                                "completed_agents": result.get("completed_agents") or [],
+                            },
+                        )
 
                 st.markdown(ai_content)
                 st.session_state.messages.append({"role": "assistant", "content": ai_content})

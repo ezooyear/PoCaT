@@ -27,6 +27,7 @@ from langchain_core.messages import SystemMessage, AIMessage
 
 from config.settings import get_llm
 from graph.state import AgentState
+from observability.langfuse import langfuse_observation, update_observation
 from agents.supervisor.prompts import (
     SUPERVISOR_PLAN_PROMPT,
     SUPERVISOR_SYNTHESIZE_PROMPT,
@@ -108,7 +109,6 @@ def _plan_mode(state: AgentState) -> dict:
                 "customer_agent",
                 "product_agent",
                 "eligibility_agent",
-                "financial_agent",
                 "recommend_agent",
                 "validation_agent",
             ],
@@ -166,10 +166,31 @@ def _synthesize_mode(state: AgentState) -> dict:
     agent_outputs뿐 아니라 구조화된 개별 result 필드를 함께 사용한다.
     """
 
-    llm = get_llm()
-
     user_query = state.get("user_query") or _get_last_user_text(state.get("messages", []))
     final_context = _build_final_context(state, user_query)
+
+    deterministic_answer = _build_deterministic_final_answer(final_context)
+    if deterministic_answer:
+        return {
+            "messages": [AIMessage(content=deterministic_answer)],
+            "draft_answer": deterministic_answer,
+            "final_answer": deterministic_answer,
+            "next": "FINISH",
+            "current_agent": "supervisor",
+            "current_step": len(state.get("plan") or []),
+            "agent_logs": _append_log(
+                state,
+                {
+                    "agent": "supervisor",
+                    "mode": "synthesize",
+                    "task_type": state.get("task_type"),
+                    "used_validation": bool(state.get("validation_result")),
+                    "deterministic": True,
+                },
+            ),
+        }
+
+    llm = get_llm()
     agent_results = _format_agent_results(final_context)
 
     prompt = SUPERVISOR_SYNTHESIZE_PROMPT.format(agent_results=agent_results)
@@ -199,6 +220,381 @@ def _synthesize_mode(state: AgentState) -> dict:
             },
         ),
     }
+
+
+def _build_deterministic_final_answer_legacy(final_context: dict) -> str:
+    task_type = final_context.get("task_type")
+    if task_type != "recommendation":
+        return ""
+
+    recommend_result = final_context.get("recommend_result") or {}
+    if not isinstance(recommend_result, dict):
+        return ""
+
+    payload = recommend_result.get("result", {})
+    if not isinstance(payload, dict):
+        return ""
+
+    recommendations = payload.get("recommendations") or []
+    needs_check = payload.get("needs_check_products") or []
+    rejected = payload.get("rejected_products") or []
+
+    if not recommendations and not needs_check and not rejected:
+        return ""
+
+    lines = ["추천 결과를 정리해 드립니다.", ""]
+
+    if recommendations:
+        lines.append("추천 상품")
+        for index, item in enumerate(recommendations, start=1):
+            if not isinstance(item, dict):
+                continue
+            product_name = str(item.get("product_name") or "미확인 상품").strip()
+            reason = str(item.get("reason") or "가입 가능, 기본 조건 충돌 없음").strip()
+            score = item.get("score")
+            interest = item.get("estimated_interest")
+
+            line = f"{index}. {product_name}"
+            if score is not None:
+                line += f" (점수 {score})"
+            lines.append(line)
+            lines.append(f"추천 이유: {reason}")
+            if interest is not None:
+                try:
+                    lines.append(f"예상 이자 참고: {int(interest):,}원")
+                except (TypeError, ValueError):
+                    pass
+
+    if needs_check:
+        lines.append("")
+        lines.append("추가 확인 필요 상품")
+        for item in needs_check:
+            if not isinstance(item, dict):
+                continue
+            product_name = str(item.get("product_name") or "미확인 상품").strip()
+            reasons = item.get("check_required") or []
+            reason_text = ", ".join(str(reason) for reason in reasons) if reasons else "세부 조건 확인 필요"
+            lines.append(f"- {product_name}: {reason_text}")
+
+    if rejected:
+        lines.append("")
+        lines.append("가입 불가 또는 제외 상품")
+        for item in rejected:
+            if not isinstance(item, dict):
+                continue
+            product_name = str(item.get("product_name") or "미확인 상품").strip()
+            reasons = item.get("ineligibility_reasons") or []
+            reason_text = ", ".join(str(reason) for reason in reasons) if reasons else "가입 불가"
+            lines.append(f"- {product_name}: {reason_text}")
+
+    lines.append("")
+    lines.append("실제 적용 금리와 가입 가능 여부는 거래 시점, 고객 조건, 은행 정책에 따라 달라질 수 있습니다.")
+    lines.append("정확한 내용은 상품설명서 또는 은행 상담을 통해 최종 확인하는 것이 좋습니다.")
+    return "\n".join(lines)
+
+
+def _build_deterministic_final_answer(final_context: dict) -> str:
+    task_type = final_context.get("task_type")
+    if task_type == "switch_analysis":
+        return _build_switch_analysis_answer(final_context)
+    if task_type != "recommendation":
+        return ""
+    user_query = str(final_context.get("user_query") or "")
+    if all(keyword in user_query for keyword in ["추천 상품", "추가 확인", "가입 불가"]):
+        bucketed_answer = _build_bucketed_recommendation_answer(final_context)
+        if bucketed_answer:
+            return bucketed_answer
+
+    recommend_result = final_context.get("recommend_result") or {}
+    if not isinstance(recommend_result, dict):
+        return ""
+
+    payload = recommend_result.get("result", {})
+    if not isinstance(payload, dict):
+        return ""
+
+    recommendations = payload.get("recommendations") or []
+    needs_check = payload.get("needs_check_products") or []
+    rejected = payload.get("rejected_products") or []
+
+    if not recommendations and not needs_check and not rejected:
+        return ""
+
+    filtered_recommendations = [item for item in recommendations if isinstance(item, dict)]
+    filtered_needs_check = [item for item in needs_check if isinstance(item, dict)]
+    filtered_rejected = [item for item in rejected if isinstance(item, dict)]
+
+    lines = ["추천 결과를 정리해 드립니다."]
+
+    if filtered_recommendations:
+        top = filtered_recommendations[0]
+        top_name = str(top.get("product_name") or "미확인 상품").strip()
+        top_reason = str(top.get("reason") or "가입 가능하고 기본 조건 충돌이 없습니다.").strip()
+        top_score = top.get("score")
+
+        lines.append("")
+        lines.append("가장 적합한 상품")
+        if top_score is not None:
+            lines.append(f"- {top_name} (점수 {top_score})")
+        else:
+            lines.append(f"- {top_name}")
+        lines.append(f"- 추천 이유: {top_reason}")
+
+        if top.get("estimated_interest") is not None:
+            try:
+                lines.append(f"- 예상 이자: {int(top['estimated_interest']):,}원")
+            except (TypeError, ValueError):
+                pass
+
+        remaining = filtered_recommendations[1:4]
+        if remaining:
+            lines.append("")
+            lines.append("함께 볼 상품")
+            for item in remaining:
+                product_name = str(item.get("product_name") or "미확인 상품").strip()
+                reason = str(item.get("reason") or "가입 가능").strip()
+                score = item.get("score")
+                line = f"- {product_name}"
+                if score is not None:
+                    line += f" (점수 {score})"
+                lines.append(line)
+                lines.append(f"  이유: {reason}")
+
+    if filtered_needs_check:
+        lines.append("")
+        lines.append("추가 확인 필요 상품")
+        for item in filtered_needs_check[:5]:
+            product_name = str(item.get("product_name") or "미확인 상품").strip()
+            reasons = item.get("check_required") or []
+            reason_text = ", ".join(str(reason) for reason in reasons) if reasons else "상세 조건 확인 필요"
+            lines.append(f"- {product_name}: {reason_text}")
+
+    if filtered_rejected:
+        lines.append("")
+        lines.append("가입 불가 또는 제외 상품")
+        for item in filtered_rejected[:5]:
+            product_name = str(item.get("product_name") or "미확인 상품").strip()
+            reasons = item.get("ineligibility_reasons") or []
+            reason_text = ", ".join(str(reason) for reason in reasons) if reasons else "가입 불가"
+            lines.append(f"- {product_name}: {reason_text}")
+
+    lines.append("")
+    lines.append("실제 적용 금리와 가입 가능 여부는 거래 시점, 고객 조건, 은행 정책에 따라 달라질 수 있습니다.")
+    lines.append("정확한 내용은 상품설명서 또는 은행 상담을 통해 최종 확인하는 것이 좋습니다.")
+    return "\n".join(lines)
+
+
+def _build_deterministic_final_answer(final_context: dict) -> str:
+    task_type = final_context.get("task_type")
+    if task_type == "switch_analysis":
+        return _build_switch_analysis_answer(final_context)
+    if task_type != "recommendation":
+        return ""
+
+    user_query = str(final_context.get("user_query") or "")
+    if all(keyword in user_query for keyword in ["추천 상품", "추가 확인", "가입 불가"]):
+        bucketed_answer = _build_bucketed_recommendation_answer(final_context)
+        if bucketed_answer:
+            return bucketed_answer
+
+    recommend_result = final_context.get("recommend_result") or {}
+    if not isinstance(recommend_result, dict):
+        return ""
+
+    payload = recommend_result.get("result", {})
+    if not isinstance(payload, dict):
+        return ""
+
+    recommendations = [item for item in (payload.get("recommendations") or []) if isinstance(item, dict)]
+    needs_check = [item for item in (payload.get("needs_check_products") or []) if isinstance(item, dict)]
+    rejected = [item for item in (payload.get("rejected_products") or []) if isinstance(item, dict)]
+
+    if not recommendations and not needs_check and not rejected:
+        return ""
+
+    lines = ["추천 결과를 정리해 드립니다."]
+
+    if recommendations:
+        lines.append("")
+        lines.append("가장 적합한 상품")
+        lines.extend(_format_recommendation_block(recommendations[0]))
+
+        remaining = recommendations[1:4]
+        if remaining:
+            lines.append("")
+            lines.append("함께 볼 상품")
+            for item in remaining:
+                lines.extend(_format_compact_recommendation_block(item))
+
+    if needs_check:
+        lines.append("")
+        lines.append("추가 확인 필요 상품")
+        for item in needs_check[:3]:
+            name = str(item.get("product_name") or "미확인 상품").strip()
+            reasons = [str(reason).strip() for reason in (item.get("check_required") or []) if str(reason).strip()]
+            reason_text = ", ".join(reasons) if reasons else "상세 조건 확인 필요"
+            lines.append(f"- {name}")
+            lines.append(f"  확인할 항목: {reason_text}")
+
+    if rejected:
+        lines.append("")
+        lines.append("가입 불가 또는 제외 상품")
+        for item in rejected[:3]:
+            name = str(item.get("product_name") or "미확인 상품").strip()
+            reasons = [str(reason).strip() for reason in (item.get("ineligibility_reasons") or []) if str(reason).strip()]
+            reason_text = ", ".join(reasons) if reasons else "가입 불가"
+            lines.append(f"- {name}")
+            lines.append(f"  제외 이유: {reason_text}")
+
+    lines.append("")
+    lines.append("실제 적용 금리와 가입 가능 여부는 거래 시점, 고객 조건, 은행 정책에 따라 달라질 수 있습니다.")
+    lines.append("정확한 내용은 상품설명서 또는 은행 상담을 통해 최종 확인하는 것이 좋습니다.")
+    return "\n".join(lines)
+
+
+def _format_recommendation_block(item: dict) -> list[str]:
+    name = str(item.get("product_name") or "미확인 상품").strip()
+    score = item.get("score")
+    reason = str(item.get("reason") or "가입 가능하고 기본 조건 충돌이 없습니다.").strip()
+
+    lines = [f"- 상품명: {name}"]
+    if score is not None:
+        lines.append(f"  추천 점수: {score}")
+    lines.append(f"  추천 이유: {reason}")
+
+    estimated_interest = item.get("estimated_interest")
+    if estimated_interest is not None:
+        try:
+            lines.append(f"  예상 이자: {int(estimated_interest):,}원")
+        except (TypeError, ValueError):
+            pass
+
+    maturity_amount = item.get("maturity_amount")
+    if maturity_amount is not None:
+        try:
+            lines.append(f"  만기 금액 참고: {int(maturity_amount):,}원")
+        except (TypeError, ValueError):
+            pass
+
+    switch_comparison = str(item.get("switch_comparison") or "").strip()
+    if switch_comparison:
+        lines.append(f"  참고: {switch_comparison}")
+
+    return lines
+
+
+def _format_compact_recommendation_block(item: dict) -> list[str]:
+    name = str(item.get("product_name") or "미확인 상품").strip()
+    score = item.get("score")
+    reason = str(item.get("reason") or "가입 가능").strip()
+
+    label = f"- {name}"
+    if score is not None:
+        label += f" (점수 {score})"
+
+    return [label, f"  이유: {reason}"]
+
+
+def _build_switch_analysis_answer(final_context: dict) -> str:
+    financial_result = final_context.get("financial_result") or {}
+    recommend_result = final_context.get("recommend_result") or {}
+
+    tool_results = []
+    if isinstance(financial_result, dict):
+        payload = financial_result.get("result", {})
+        if isinstance(payload, dict):
+            raw_tool_results = payload.get("tool_results", [])
+            if isinstance(raw_tool_results, list):
+                tool_results = raw_tool_results
+
+    switch_result = ""
+    for item in tool_results:
+        if isinstance(item, dict) and item.get("tool_name") == "compare_switch_benefit":
+            switch_result = str(item.get("tool_result") or "").strip()
+            if switch_result:
+                break
+
+    if not switch_result:
+        return ""
+
+    lines = ["갈아타기 분석 결과를 정리해 드립니다.", "", switch_result]
+
+    if isinstance(recommend_result, dict):
+        payload = recommend_result.get("result", {})
+        if isinstance(payload, dict):
+            recommendations = payload.get("recommendations") or []
+            filtered = [item for item in recommendations if isinstance(item, dict)]
+            if filtered:
+                top = filtered[0]
+                lines.extend(
+                    [
+                        "",
+                        "추천 방향",
+                        f"- {str(top.get('product_name') or '미확인 상품').strip()}",
+                        f"- 이유: {str(top.get('reason') or '비교 결과를 참고해 판단하는 것이 좋습니다.').strip()}",
+                    ]
+                )
+
+    return "\n".join(lines)
+
+
+def _build_bucketed_recommendation_answer(final_context: dict) -> str:
+    recommend_result = final_context.get("recommend_result") or {}
+    if not isinstance(recommend_result, dict):
+        return ""
+
+    payload = recommend_result.get("result", {})
+    if not isinstance(payload, dict):
+        return ""
+
+    recommendations = [item for item in (payload.get("recommendations") or []) if isinstance(item, dict)]
+    needs_check = [item for item in (payload.get("needs_check_products") or []) if isinstance(item, dict)]
+    rejected = [item for item in (payload.get("rejected_products") or []) if isinstance(item, dict)]
+
+    if not recommendations and not needs_check and not rejected:
+        return ""
+
+    lines = ["요청하신 기준으로 상품을 나눠서 정리해 드립니다."]
+
+    lines.append("")
+    lines.append("추천 상품")
+    if recommendations:
+        for item in recommendations[:5]:
+            name = str(item.get("product_name") or "미확인 상품").strip()
+            score = item.get("score")
+            reason = str(item.get("reason") or "가입 가능").strip()
+            line = f"- {name}"
+            if score is not None:
+                line += f" (점수 {score})"
+            lines.append(line)
+            lines.append(f"  이유: {reason}")
+    else:
+        lines.append("- 해당 없음")
+
+    lines.append("")
+    lines.append("추가 확인 필요 상품")
+    if needs_check:
+        for item in needs_check[:5]:
+            name = str(item.get("product_name") or "미확인 상품").strip()
+            reason_text = ", ".join(str(reason) for reason in (item.get("check_required") or [])) or "상세 조건 확인 필요"
+            lines.append(f"- {name}: {reason_text}")
+    else:
+        lines.append("- 해당 없음")
+
+    lines.append("")
+    lines.append("가입 불가 또는 제외 상품")
+    if rejected:
+        for item in rejected[:5]:
+            name = str(item.get("product_name") or "미확인 상품").strip()
+            reason_text = ", ".join(str(reason) for reason in (item.get("ineligibility_reasons") or [])) or "가입 불가"
+            lines.append(f"- {name}: {reason_text}")
+    else:
+        lines.append("- 해당 없음")
+
+    lines.append("")
+    lines.append("실제 적용 금리와 가입 가능 여부는 거래 시점, 고객 조건, 은행 정책에 따라 달라질 수 있습니다.")
+    lines.append("정확한 내용은 상품설명서 또는 은행 상담을 통해 최종 확인하는 것이 좋습니다.")
+    return "\n".join(lines)
 
 
 def _llm_plan_routing(messages: list) -> dict:
@@ -345,7 +741,6 @@ def _ensure_required_agents(task_type: str, plan: list[str]) -> list[str]:
             "customer_agent",
             "product_agent",
             "eligibility_agent",
-            "financial_agent",
             "recommend_agent",
             "validation_agent",
         ],
@@ -548,7 +943,6 @@ def _fallback_routing(user_query: str) -> dict:
             "task_type": "recommendation",
             "plan": [
                 "customer_agent",
-                "financial_agent",
                 "product_agent",
                 "eligibility_agent",
                 "recommend_agent",
@@ -880,3 +1274,35 @@ def _clean_text(text: str) -> str:
         .replace("<br />", "\n")
         .strip()
     )
+
+
+_original_supervisor_node = supervisor_node
+
+
+def supervisor_node(state: AgentState) -> dict:
+    plan = state.get("plan") or []
+    mode = "plan" if not plan else "synthesize"
+
+    with langfuse_observation(
+        name="supervisor",
+        as_type="span",
+        input={
+            "mode": mode,
+            "task_type": state.get("task_type"),
+            "message_count": len(state.get("messages") or []),
+        },
+        metadata={"agent": "supervisor", "mode": mode},
+    ) as observation:
+        result = _original_supervisor_node(state)
+        update_observation(
+            observation,
+            output={
+                "mode": mode,
+                "task_type": result.get("task_type", state.get("task_type")),
+                "next": result.get("next"),
+                "plan": result.get("plan", state.get("plan")),
+                "completed_agents": result.get("completed_agents", state.get("completed_agents") or []),
+                "final_answer_preview": str(result.get("final_answer") or "")[:500],
+            },
+        )
+        return result
