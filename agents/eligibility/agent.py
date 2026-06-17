@@ -15,6 +15,7 @@ from agents.eligibility.tools import (
     build_eligibility_summary,
     evaluate_product_eligibility,
     extract_product_candidates,
+    _infer_is_soldier,
     parse_customer_accounts,
     parse_customer_profile,
 )
@@ -59,6 +60,9 @@ def eligibility_agent_node(state: AgentState) -> dict:
             customer_accounts = _load_customer_accounts(state, customer_result, agent_outputs)
             product_candidates = _load_product_candidates(state, product_result, agent_outputs)
             user_constraints = _extract_user_constraints(state)
+            customer_profile_source = customer_profile.get("customer_profile_source", "missing")
+            parsed_customer_fields = customer_profile.get("parsed_customer_fields", [])
+            parsed_customer_values = customer_profile.get("parsed_customer_values", {})
 
             with langfuse_observation(
                 name="eligibility_agent.prepare_inputs",
@@ -68,6 +72,8 @@ def eligibility_agent_node(state: AgentState) -> dict:
                     "customer_accounts_count": len(customer_accounts or []),
                     "product_candidate_count": len(product_candidates or []),
                     "user_constraints": user_constraints,
+                    "customer_profile_source": customer_profile_source,
+                    "parsed_customer_values": parsed_customer_values,
                 },
                 metadata={"agent": "eligibility_agent", "step": "prepare_inputs"},
             ) as step_observation:
@@ -77,6 +83,9 @@ def eligibility_agent_node(state: AgentState) -> dict:
                         "customer_profile": customer_profile,
                         "customer_accounts_preview": customer_accounts[:5] if isinstance(customer_accounts, list) else customer_accounts,
                         "product_candidates_preview": product_candidates[:5] if isinstance(product_candidates, list) else product_candidates,
+                        "customer_profile_source": customer_profile_source,
+                        "parsed_customer_fields": parsed_customer_fields,
+                        "parsed_customer_values": parsed_customer_values,
                     },
                     metadata={"agent": "eligibility_agent"},
                 )
@@ -137,6 +146,9 @@ def eligibility_agent_node(state: AgentState) -> dict:
                     "invalid_fields": invalid_fields,
                     "source_agent": "eligibility_agent",
                     "user_constraints": user_constraints,
+                    "customer_profile_source": customer_profile_source,
+                    "parsed_customer_fields": parsed_customer_fields,
+                    "parsed_customer_values": parsed_customer_values,
                 },
                 evidence=results,
                 error=None,
@@ -151,6 +163,9 @@ def eligibility_agent_node(state: AgentState) -> dict:
                         "fallback_reason": fallback_reason,
                         "missing_fields": missing_fields,
                         "invalid_fields": invalid_fields,
+                        "customer_profile_source": customer_profile_source,
+                        "parsed_customer_fields": parsed_customer_fields,
+                        "parsed_customer_values": parsed_customer_values,
                         "eligible_product_names": [
                             item.get("product_name")
                             for item in grouped["eligible"][:10]
@@ -179,6 +194,9 @@ def eligibility_agent_node(state: AgentState) -> dict:
                     "fallback_reason": fallback_reason,
                     "missing_fields": ",".join(missing_fields[:10]) if missing_fields else None,
                     "invalid_fields": ",".join(invalid_fields[:10]) if invalid_fields else None,
+                    "customer_profile_source": customer_profile_source,
+                    "parsed_customer_fields": ",".join(parsed_customer_fields[:10]) if parsed_customer_fields else None,
+                    "parsed_customer_values": str(parsed_customer_values)[:500] if parsed_customer_values else None,
                 },
             )
 
@@ -228,12 +246,25 @@ def eligibility_agent_node(state: AgentState) -> dict:
 def _load_customer_profile(state: AgentState, customer_result: dict, agent_outputs: dict) -> dict:
     customer_profile = state.get("customer_profile")
     if customer_profile:
-        return _enrich_customer_profile(customer_profile)
+        return _enrich_customer_profile(customer_profile, source="structured_state")
 
-    customer_profile_raw = _extract_tool_result(customer_result, "get_customer_profile")
-    if not customer_profile_raw:
-        customer_profile_raw = _extract_summary(agent_outputs.get("customer_agent"))
-    return _enrich_customer_profile(parse_customer_profile(customer_profile_raw))
+    customer_result_profile = _extract_customer_profile_from_result(customer_result)
+    if customer_result_profile:
+        return _enrich_customer_profile(customer_result_profile, source="customer_result")
+
+    customer_agent_payload = agent_outputs.get("customer_agent")
+    if isinstance(customer_agent_payload, dict):
+        agent_output_profile = _extract_customer_profile_from_agent_output(customer_agent_payload)
+        if agent_output_profile:
+            return _enrich_customer_profile(agent_output_profile, source="agent_outputs")
+
+    customer_texts = _collect_customer_profile_texts(customer_result, agent_outputs)
+    if customer_texts:
+        merged_text = "\n".join(text for text in customer_texts if text)
+        source = "customer_result" if _has_customer_result_text(customer_result) else "parsed_summary"
+        return _enrich_customer_profile(parse_customer_profile(merged_text), source=source)
+
+    return _enrich_customer_profile({}, source="missing")
 
 
 def _load_customer_accounts(state: AgentState, customer_result: dict, agent_outputs: dict) -> list[dict]:
@@ -247,6 +278,58 @@ def _load_customer_accounts(state: AgentState, customer_result: dict, agent_outp
     if not customer_accounts_raw:
         customer_accounts_raw = _extract_summary(agent_outputs.get("customer_agent"))
     return parse_customer_accounts(customer_accounts_raw)
+
+
+def _extract_customer_profile_from_result(customer_result: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(customer_result, dict):
+        return None
+
+    payload = customer_result.get("result", {})
+    if isinstance(payload, dict):
+        structured_profile = payload.get("customer_profile")
+        if isinstance(structured_profile, dict):
+            return structured_profile
+    return None
+
+
+def _extract_customer_profile_from_agent_output(agent_output: dict[str, Any]) -> dict[str, Any] | None:
+    payload = agent_output.get("result", {})
+    if isinstance(payload, dict):
+        structured_profile = payload.get("customer_profile")
+        if isinstance(structured_profile, dict):
+            return structured_profile
+    return None
+
+
+def _collect_customer_profile_texts(customer_result: dict[str, Any], agent_outputs: dict[str, Any]) -> list[str]:
+    texts: list[str] = []
+
+    customer_profile_raw = _extract_tool_result(customer_result, "get_customer_profile")
+    if customer_profile_raw:
+        texts.append(str(customer_profile_raw))
+
+    if isinstance(customer_result, dict):
+        payload = customer_result.get("result", {})
+        if isinstance(payload, dict):
+            summary = payload.get("summary")
+            if summary:
+                texts.append(str(summary))
+
+    customer_summary = _extract_summary(agent_outputs.get("customer_agent"))
+    if customer_summary:
+        texts.append(str(customer_summary))
+
+    return _dedupe(texts)
+
+
+def _has_customer_result_text(customer_result: dict[str, Any]) -> bool:
+    if _extract_tool_result(customer_result, "get_customer_profile"):
+        return True
+    if isinstance(customer_result, dict):
+        payload = customer_result.get("result", {})
+        if isinstance(payload, dict) and payload.get("summary"):
+            return True
+    return False
 
 
 def _load_product_candidates(state: AgentState, product_result: dict, agent_outputs: dict) -> list[dict]:
@@ -276,6 +359,9 @@ def _build_guarded_eligibility_results(
     results: list[dict] = []
     fallback_notes: list[str] = []
     profile_missing_fields = _find_missing_profile_fields(customer_profile)
+
+    if profile_missing_fields:
+        fallback_notes.append("customer_profile_incomplete")
 
     if not product_candidates:
         fallback_notes.append("product_candidates_missing")
@@ -468,6 +554,7 @@ def _apply_user_constraints(result: dict[str, Any], product: dict, user_constrai
 def _find_missing_profile_fields(customer_profile: dict[str, Any]) -> list[str]:
     missing_fields = []
     raw_text = str(customer_profile.get("raw_text") or "")
+    parsed_customer_fields = set(customer_profile.get("parsed_customer_fields") or [])
 
     for field_name, label in REQUIRED_PROFILE_FIELDS.items():
         value = customer_profile.get(field_name)
@@ -481,7 +568,7 @@ def _find_missing_profile_fields(customer_profile: dict[str, Any]) -> list[str]:
             continue
 
         if isinstance(value, bool):
-            if value is False and field_name not in raw_text:
+            if value is False and field_name not in parsed_customer_fields and not _has_explicit_boolean_text(raw_text, field_name):
                 missing_fields.append(label)
             continue
 
@@ -491,7 +578,7 @@ def _find_missing_profile_fields(customer_profile: dict[str, Any]) -> list[str]:
     return _dedupe(missing_fields)
 
 
-def _enrich_customer_profile(customer_profile: dict[str, Any]) -> dict[str, Any]:
+def _enrich_customer_profile(customer_profile: dict[str, Any], *, source: str) -> dict[str, Any]:
     """
     파서가 놓친 핵심 고객 정보를 raw_text에서 한 번 더 보완한다.
 
@@ -499,18 +586,96 @@ def _enrich_customer_profile(customer_profile: dict[str, Any]) -> dict[str, Any]
     """
 
     profile = dict(customer_profile or {})
-    raw_text = str(profile.get("raw_text") or "")
+    raw_text = _normalize_summary_text(str(profile.get("raw_text") or ""))
+    parsed_customer_fields = set(profile.get("parsed_customer_fields") or [])
+    parsed_customer_values = dict(profile.get("parsed_customer_values") or {})
+
+    profile.setdefault("customer_profile_source", source)
+    profile.setdefault("parsed_customer_fields", [])
+    profile.setdefault("parsed_customer_values", {})
+
+    # 이미 구조화된 값이 있으면 True/False 여부와 상관없이 확인된 정보로 취급해야
+    # "아니오"가 missing으로 잘못 분류되는 문제를 줄일 수 있습니다.
+    for field_name in [
+        "age",
+        "job",
+        "income",
+        "monthly_saving_amount",
+        "salary_transfer",
+        "auto_transfer",
+        "card_usage",
+        "main_bank",
+    ]:
+        if field_name in profile and profile.get(field_name) not in (None, "", []):
+            parsed_customer_fields.add(field_name)
+            parsed_customer_values[field_name] = profile.get(field_name)
+
+    # customer_agent가 자연어 summary만 넘겨도 eligibility가 핵심 값을 읽을 수 있어야 하므로
+    # 나이, 소득, 월 저축 가능액 같은 필수 필드를 summary 표현에서 다시 보강합니다.
+    if profile.get("age") in (None, "", 0):
+        age_value = _extract_age_from_summary(raw_text)
+        if age_value is not None:
+            profile["age"] = age_value
+            parsed_customer_fields.add("age")
+            parsed_customer_values["age"] = age_value
 
     if profile.get("income") in (None, "", 0):
-        income_match = re.search(r"(소득|월소득|연소득)[:\s]*([0-9][0-9,]*)", raw_text)
-        if income_match:
-            profile["income"] = int(income_match.group(2).replace(",", ""))
+        income_value = _extract_money_from_summary(
+            raw_text,
+            labels=["연간 소득", "연소득", "소득", "annual_income"],
+        )
+        if income_value is not None:
+            profile["income"] = income_value
+            parsed_customer_fields.add("income")
+            parsed_customer_values["income"] = income_value
 
-    if profile.get("salary_transfer") is None:
-        profile["salary_transfer"] = "급여이체" in raw_text
+    if profile.get("monthly_saving_amount") in (None, "", 0):
+        saving_value = _extract_money_from_summary(
+            raw_text,
+            labels=["월 가용 저축액", "가용저축액", "월 납입 가능 금액", "월 저축 가능 금액", "월 저축 가능액", "월 저축액"],
+        )
+        if saving_value is not None:
+            profile["monthly_saving_amount"] = saving_value
+            parsed_customer_fields.add("monthly_saving_amount")
+            parsed_customer_values["monthly_saving_amount"] = saving_value
 
-    if profile.get("auto_transfer") is None:
-        profile["auto_transfer"] = "자동이체" in raw_text
+    if not profile.get("job"):
+        job_match = re.search(r"(직업|customer_job)[:\s|]*([^\n|]+)", raw_text)
+        if job_match:
+            profile["job"] = job_match.group(2).strip()
+            parsed_customer_fields.add("job")
+            parsed_customer_values["job"] = profile["job"]
+
+    # 여부 항목은 "아니오"도 유효한 정보이므로
+    # 명시 표현이 있으면 기존 기본값보다 summary 해석 결과를 우선합니다.
+    parsed_value = _extract_boolean_from_summary(raw_text, "급여이체")
+    if parsed_value is not None:
+        profile["salary_transfer"] = parsed_value
+        parsed_customer_fields.add("salary_transfer")
+        parsed_customer_values["salary_transfer"] = parsed_value
+
+    parsed_value = _extract_boolean_from_summary(raw_text, "자동이체")
+    if parsed_value is not None:
+        profile["auto_transfer"] = parsed_value
+        parsed_customer_fields.add("auto_transfer")
+        parsed_customer_values["auto_transfer"] = parsed_value
+
+    parsed_value = _extract_boolean_from_summary(raw_text, "카드 사용")
+    if parsed_value is not None:
+        profile["card_usage"] = parsed_value
+        parsed_customer_fields.add("card_usage")
+        parsed_customer_values["card_usage"] = parsed_value
+
+    if profile.get("main_bank") is None:
+        parsed_value = _extract_boolean_from_summary(raw_text, "주거래")
+        if parsed_value is not None:
+            profile["main_bank"] = parsed_value
+            parsed_customer_fields.add("main_bank")
+            parsed_customer_values["main_bank"] = parsed_value
+
+    profile["is_soldier"] = _infer_is_soldier(profile.get("job"), raw_text)
+    profile["parsed_customer_fields"] = sorted(parsed_customer_fields)
+    profile["parsed_customer_values"] = parsed_customer_values
 
     return profile
 
@@ -528,6 +693,108 @@ def _find_missing_product_requirements(product: dict[str, Any]) -> list[str]:
         missing_fields.append("product_job_condition")
 
     return _dedupe(missing_fields)
+
+
+def _extract_age_from_summary(raw_text: str) -> int | None:
+    patterns = [
+        r"생년월일[^\n]*연령[:\s|]*\d{4}-\d{2}-\d{2}[^\n]*\(([0-9]{1,2})\s*세\)",
+        r"\d{4}-\d{2}-\d{2}\s*\(([0-9]{1,2})",
+        r"(현재\s*연령|연령|나이)[:\s|]*([0-9]{1,2})(?:\s*세)?",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, raw_text)
+        if not match:
+            continue
+        # 패턴마다 캡처 그룹 수가 다르므로 마지막 숫자 그룹을 사용합니다.
+        for group in reversed(match.groups()):
+            digits = re.sub(r"[^0-9]", "", str(group))
+            if digits:
+                return int(digits)
+    return None
+
+
+def _extract_money_from_summary(raw_text: str, *, labels: list[str]) -> int | None:
+    normalized_text = _normalize_summary_text(raw_text)
+
+    for label in labels:
+        pattern = rf"{re.escape(label)}[:\s|]*([0-9][0-9,\s]*)\s*(만원|원)?"
+        match = re.search(pattern, normalized_text)
+        if not match:
+            continue
+        value_text = match.group(1)
+        unit = match.group(2) or "원"
+        parsed_value = _parse_money_value(value_text, unit)
+        if parsed_value is not None:
+            return parsed_value
+
+    # 같은 줄 안에 라벨과 금액이 함께 있으면 금액 부분만 한 번 더 느슨하게 찾습니다.
+    for line in normalized_text.splitlines():
+        if not any(label in line for label in labels):
+            continue
+        amount_match = re.search(r"([0-9][0-9,\s]*)\s*(만원|원)", line)
+        if not amount_match:
+            continue
+        parsed_value = _parse_money_value(amount_match.group(1), amount_match.group(2))
+        if parsed_value is not None:
+            return parsed_value
+    return None
+
+
+def _parse_money_value(value_text: str, unit: str) -> int | None:
+    digits = re.sub(r"[^0-9]", "", str(value_text or ""))
+    if not digits:
+        return None
+
+    amount = int(digits)
+    # "만원"은 숫자 × 10,000, "원"은 그대로 사용합니다.
+    if unit == "만원":
+        return amount * 10000
+    return amount
+
+
+def _normalize_summary_text(raw_text: str) -> str:
+    # 요약 문장에 들어가는 굵게 표시나 특수 공백 때문에 숫자 파싱이 흔들리지 않도록
+    # 먼저 텍스트를 단순한 형태로 정리합니다.
+    text = str(raw_text or "")
+    text = text.replace("**", "")
+    text = text.replace("\u00a0", " ")
+    text = text.replace("\u202f", " ")
+    text = text.replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    return text
+
+
+def _extract_boolean_from_summary(raw_text: str, label: str) -> bool | None:
+    patterns = [
+        rf"{re.escape(label)}\s*여부[:\s|]*(예|아니오|yes|no|true|false)",
+        rf"{re.escape(label)}[:\s|]*(예|아니오|yes|no|true|false)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, raw_text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        value = match.group(1).strip().lower()
+        if value in {"예", "yes", "true"}:
+            return True
+        if value in {"아니오", "no", "false"}:
+            return False
+    return None
+
+
+def _has_explicit_boolean_text(raw_text: str, field_name: str) -> bool:
+    label_map = {
+        "salary_transfer": "급여이체",
+        "auto_transfer": "자동이체",
+        "card_usage": "카드 사용",
+        "main_bank": "주거래",
+        "marketing_agree": "마케팅",
+    }
+    label = label_map.get(field_name)
+    if not label:
+        return False
+    return _extract_boolean_from_summary(raw_text, label) is not None
 
 
 def _validate_product_name(product_name: str) -> list[str]:

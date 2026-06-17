@@ -138,10 +138,247 @@ def test_customer_profile_missing_blocks_eligible_true() -> None:
 
     eligibility_update = eligibility_agent_node(state)
     results = eligibility_update.get("eligibility_results") or []
+    payload = eligibility_update.get("eligibility_result", {}).get("result", {})
 
     assert results, "eligibility_results should not be empty"
     assert all(item.get("status") != "eligible" for item in results)
-    assert any("고객 나이 정보" in item.get("missing_fields", []) for item in results)
+    assert payload.get("customer_profile_source") == "parsed_summary"
+    assert "customer_profile_incomplete" in str(payload.get("fallback_reason"))
+    assert "고객 나이 정보" in (payload.get("missing_fields") or [])
+
+
+def test_summary_profile_fields_are_parsed_without_missing_core_fields() -> None:
+    state = make_base_state()
+    state["customer_profile"] = None
+    state["agent_outputs"]["customer_agent"] = """
+고객명: 고객_223
+현재 연령: 21세
+직업: 군인
+연간 소득: 2,900만원
+월 가용 저축액: 100,000원
+급여이체 여부: 예
+자동이체 여부: 아니오
+카드 사용 여부: 아니오
+""".strip()
+
+    eligibility_update = eligibility_agent_node(state)
+    payload = eligibility_update.get("eligibility_result", {}).get("result", {})
+    customer_profile = payload.get("customer_profile", {})
+    missing_fields = payload.get("missing_fields") or []
+
+    assert payload.get("customer_profile_source") == "parsed_summary"
+    assert customer_profile.get("age") == 21
+    assert customer_profile.get("income") == 29000000
+    assert customer_profile.get("monthly_saving_amount") == 100000
+    assert customer_profile.get("job") == "군인"
+    assert customer_profile.get("salary_transfer") is True
+    assert customer_profile.get("auto_transfer") is False
+    assert customer_profile.get("card_usage") is False
+    assert "고객 나이 정보" not in missing_fields
+    assert "고객 월 가용 저축액" not in missing_fields
+
+
+def test_customer_result_summary_maps_customer_fields_without_missing() -> None:
+    state = make_base_state()
+    state["agent_outputs"]["customer_agent"] = {}
+    state["customer_result"] = {
+        "result": {
+            "summary": """
+고객명: 고객_223
+현재 연령: 21세
+직업: 군인
+연간 소득: 2,900만원
+월 가용 저축액: 100,000원
+급여이체 여부: 예
+자동이체 여부: 아니오
+카드 사용 여부: 아니오
+""".strip()
+        }
+    }
+
+    eligibility_update = eligibility_agent_node(state)
+    payload = eligibility_update.get("eligibility_result", {}).get("result", {})
+    customer_profile = payload.get("customer_profile", {})
+    missing_fields = payload.get("missing_fields") or []
+
+    assert payload.get("customer_profile_source") == "customer_result"
+    assert customer_profile.get("age") == 21
+    assert customer_profile.get("income") == 29000000
+    assert customer_profile.get("monthly_saving_amount") == 100000
+    assert customer_profile.get("salary_transfer") is True
+    assert customer_profile.get("auto_transfer") is False
+    assert "age" in (payload.get("parsed_customer_fields") or [])
+    assert "income" in (payload.get("parsed_customer_fields") or [])
+    assert "monthly_saving_amount" in (payload.get("parsed_customer_fields") or [])
+    assert "salary_transfer" in (payload.get("parsed_customer_fields") or [])
+    assert "auto_transfer" in (payload.get("parsed_customer_fields") or [])
+    assert "age" not in missing_fields
+    assert "monthly_saving_amount" not in missing_fields
+    assert "income" not in missing_fields
+    assert "salary_transfer" not in missing_fields
+    assert "auto_transfer" not in missing_fields
+
+
+def test_birth_date_and_age_line_parses_age() -> None:
+    state = make_base_state()
+    state["agent_outputs"]["customer_agent"] = "\uc0dd\ub144\uc6d4\uc77c / \uc5f0\ub839: 2004-08-20 (22\uc138)"
+
+    eligibility_update = eligibility_agent_node(state)
+    payload = eligibility_update.get("eligibility_result", {}).get("result", {})
+    customer_profile = payload.get("customer_profile", {})
+
+    assert customer_profile.get("age") == 22
+    assert payload.get("customer_profile_source") == "parsed_summary"
+    assert payload.get("parsed_customer_values", {}).get("age") == 22
+
+
+def test_monthly_saving_amount_parses_won_value() -> None:
+    state = make_base_state()
+    state["agent_outputs"]["customer_agent"] = "월 가용 저축액: 100,000원"
+
+    eligibility_update = eligibility_agent_node(state)
+    payload = eligibility_update.get("eligibility_result", {}).get("result", {})
+    customer_profile = payload.get("customer_profile", {})
+
+    assert customer_profile.get("monthly_saving_amount") == 100000
+    assert payload.get("parsed_customer_values", {}).get("monthly_saving_amount") == 100000
+
+
+def test_monthly_saving_amount_parses_bold_won_value() -> None:
+    state = make_base_state()
+    state["agent_outputs"]["customer_agent"] = "월 가용 저축액: **100,000원**"
+
+    eligibility_update = eligibility_agent_node(state)
+    payload = eligibility_update.get("eligibility_result", {}).get("result", {})
+    customer_profile = payload.get("customer_profile", {})
+
+    assert customer_profile.get("monthly_saving_amount") == 100000
+    assert payload.get("parsed_customer_values", {}).get("monthly_saving_amount") == 100000
+
+
+def test_monthly_saving_amount_parses_manwon_value() -> None:
+    state = make_base_state()
+    state["agent_outputs"]["customer_agent"] = "월 저축액: 10만원"
+
+    eligibility_update = eligibility_agent_node(state)
+    payload = eligibility_update.get("eligibility_result", {}).get("result", {})
+    customer_profile = payload.get("customer_profile", {})
+
+    assert customer_profile.get("monthly_saving_amount") == 100000
+    assert payload.get("parsed_customer_values", {}).get("monthly_saving_amount") == 100000
+
+
+def test_monthly_saving_amount_parses_spaced_manwon_value() -> None:
+    state = make_base_state()
+    state["agent_outputs"]["customer_agent"] = "월 저축 가능액: 10 만원"
+
+    eligibility_update = eligibility_agent_node(state)
+    payload = eligibility_update.get("eligibility_result", {}).get("result", {})
+    customer_profile = payload.get("customer_profile", {})
+
+    assert customer_profile.get("monthly_saving_amount") == 100000
+    assert payload.get("parsed_customer_values", {}).get("monthly_saving_amount") == 100000
+
+
+def test_income_parses_manwon_value() -> None:
+    state = make_base_state()
+    state["agent_outputs"]["customer_agent"] = "연간 소득: 2,900만원"
+
+    eligibility_update = eligibility_agent_node(state)
+    payload = eligibility_update.get("eligibility_result", {}).get("result", {})
+    customer_profile = payload.get("customer_profile", {})
+
+    assert customer_profile.get("income") == 29000000
+    assert payload.get("parsed_customer_values", {}).get("income") == 29000000
+
+
+def test_income_parses_spaced_manwon_value() -> None:
+    state = make_base_state()
+    state["agent_outputs"]["customer_agent"] = "연간 소득: 2,900 만원"
+
+    eligibility_update = eligibility_agent_node(state)
+    payload = eligibility_update.get("eligibility_result", {}).get("result", {})
+    customer_profile = payload.get("customer_profile", {})
+
+    assert customer_profile.get("income") == 29000000
+    assert payload.get("parsed_customer_values", {}).get("income") == 29000000
+
+
+def test_income_parses_bold_manwon_value() -> None:
+    state = make_base_state()
+    state["agent_outputs"]["customer_agent"] = "연간 소득: **2,900만원**"
+
+    eligibility_update = eligibility_agent_node(state)
+    payload = eligibility_update.get("eligibility_result", {}).get("result", {})
+    customer_profile = payload.get("customer_profile", {})
+
+    assert customer_profile.get("income") == 29000000
+    assert payload.get("parsed_customer_values", {}).get("income") == 29000000
+
+
+def test_structured_customer_profile_overrides_summary_value() -> None:
+    state = make_base_state()
+    state["customer_profile"] = {
+        "age": 25,
+        "job": "군인",
+        "income": 50000000,
+        "monthly_saving_amount": 250000,
+        "salary_transfer": True,
+        "auto_transfer": False,
+        "card_usage": False,
+        "raw_text": "구조화 프로필",
+    }
+    state["agent_outputs"]["customer_agent"] = """
+현재 연령: 21세
+연간 소득: 2,900만원
+월 가용 저축액: 100,000원
+""".strip()
+
+    eligibility_update = eligibility_agent_node(state)
+    payload = eligibility_update.get("eligibility_result", {}).get("result", {})
+    customer_profile = payload.get("customer_profile", {})
+
+    assert payload.get("customer_profile_source") == "structured_state"
+    assert customer_profile.get("age") == 25
+    assert customer_profile.get("income") == 50000000
+    assert customer_profile.get("monthly_saving_amount") == 250000
+
+
+def test_no_values_are_treated_as_false_not_missing() -> None:
+    state = make_base_state()
+    state["agent_outputs"]["customer_agent"] = """
+고객명: 고객_223
+현재 연령: 21세
+직업: 군인
+연간 소득: 2,900만원
+월 가용 저축액: 100,000원
+급여이체 여부: 예
+자동이체 여부: 아니오
+카드 사용 여부: 아니오
+""".strip()
+
+    eligibility_update = eligibility_agent_node(state)
+    payload = eligibility_update.get("eligibility_result", {}).get("result", {})
+    customer_profile = payload.get("customer_profile", {})
+    missing_fields = payload.get("missing_fields") or []
+
+    assert customer_profile.get("auto_transfer") is False
+    assert customer_profile.get("card_usage") is False
+    assert "auto_transfer" not in missing_fields
+    assert "card_usage" not in missing_fields
+
+
+def test_customer_profile_incomplete_when_customer_info_is_really_missing() -> None:
+    state = make_base_state()
+    state["customer_profile"] = None
+    state["agent_outputs"]["customer_agent"] = "고객명: 고객_223"
+
+    eligibility_update = eligibility_agent_node(state)
+    payload = eligibility_update.get("eligibility_result", {}).get("result", {})
+
+    assert "customer_profile_incomplete" in str(payload.get("fallback_reason"))
+    assert "고객 나이 정보" in (payload.get("missing_fields") or [])
+    assert "고객 월 가용 저축액" in (payload.get("missing_fields") or [])
 
 
 def test_invalid_product_name_becomes_invalid_product() -> None:
@@ -201,6 +438,19 @@ def test_no_eligible_product_does_not_force_recommendation() -> None:
 def main() -> None:
     test_basic_flow()
     test_customer_profile_missing_blocks_eligible_true()
+    test_summary_profile_fields_are_parsed_without_missing_core_fields()
+    test_customer_result_summary_maps_customer_fields_without_missing()
+    test_birth_date_and_age_line_parses_age()
+    test_monthly_saving_amount_parses_won_value()
+    test_monthly_saving_amount_parses_bold_won_value()
+    test_monthly_saving_amount_parses_manwon_value()
+    test_monthly_saving_amount_parses_spaced_manwon_value()
+    test_income_parses_manwon_value()
+    test_income_parses_spaced_manwon_value()
+    test_income_parses_bold_manwon_value()
+    test_structured_customer_profile_overrides_summary_value()
+    test_no_values_are_treated_as_false_not_missing()
+    test_customer_profile_incomplete_when_customer_info_is_really_missing()
     test_invalid_product_name_becomes_invalid_product()
     test_financial_results_missing_defers_recommendation()
     test_no_eligible_product_does_not_force_recommendation()
