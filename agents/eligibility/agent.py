@@ -12,6 +12,7 @@ from langchain_core.messages import AIMessage
 from agents.base import make_agent_result
 from agents.eligibility.prompts import ELIGIBILITY_SYSTEM_PROMPT
 from agents.eligibility.tools import (
+    _extract_age_from_birth_date,
     build_eligibility_summary,
     evaluate_product_eligibility,
     extract_product_candidates,
@@ -610,10 +611,22 @@ def _enrich_customer_profile(customer_profile: dict[str, Any], *, source: str) -
             parsed_customer_fields.add(field_name)
             parsed_customer_values[field_name] = profile.get(field_name)
 
+    if profile.get("job"):
+        cleaned_job = _clean_text_value(profile.get("job"))
+        profile["job"] = cleaned_job
+        parsed_customer_fields.add("job")
+        parsed_customer_values["job"] = cleaned_job
+
     # customer_agent가 자연어 summary만 넘겨도 eligibility가 핵심 값을 읽을 수 있어야 하므로
     # 나이, 소득, 월 저축 가능액 같은 필수 필드를 summary 표현에서 다시 보강합니다.
     if profile.get("age") in (None, "", 0):
         age_value = _extract_age_from_summary(raw_text)
+        if age_value is None:
+            birth_date = _extract_birth_date_from_summary(raw_text)
+            if birth_date:
+                # 생년월일만 있어도 현재 날짜 기준으로 만 나이를 계산해
+                # 연령 제한 상품에서 불필요한 missing 처리를 줄입니다.
+                age_value = _extract_age_from_birth_date(birth_date)
         if age_value is not None:
             profile["age"] = age_value
             parsed_customer_fields.add("age")
@@ -640,9 +653,9 @@ def _enrich_customer_profile(customer_profile: dict[str, Any], *, source: str) -
             parsed_customer_values["monthly_saving_amount"] = saving_value
 
     if not profile.get("job"):
-        job_match = re.search(r"(직업|customer_job)[:\s|]*([^\n|]+)", raw_text)
+        job_match = re.search(r"(직업|customer_job)[:\s|*]*([^\n|]+)", raw_text)
         if job_match:
-            profile["job"] = job_match.group(2).strip()
+            profile["job"] = _clean_text_value(job_match.group(2))
             parsed_customer_fields.add("job")
             parsed_customer_values["job"] = profile["job"]
 
@@ -697,6 +710,7 @@ def _find_missing_product_requirements(product: dict[str, Any]) -> list[str]:
 
 def _extract_age_from_summary(raw_text: str) -> int | None:
     patterns = [
+        r"생년월일[^\n]*\(\s*현재\s*연령[:\s|]*([0-9]{1,2})\s*세\s*\)",
         r"생년월일[^\n]*연령[:\s|]*\d{4}-\d{2}-\d{2}[^\n]*\(([0-9]{1,2})\s*세\)",
         r"\d{4}-\d{2}-\d{2}\s*\(([0-9]{1,2})",
         r"(현재\s*연령|연령|나이)[:\s|]*([0-9]{1,2})(?:\s*세)?",
@@ -711,6 +725,16 @@ def _extract_age_from_summary(raw_text: str) -> int | None:
             digits = re.sub(r"[^0-9]", "", str(group))
             if digits:
                 return int(digits)
+    return None
+
+
+def _extract_birth_date_from_summary(raw_text: str) -> str | None:
+    match = re.search(r"생년월일[:\s|]*([0-9]{4}-[0-9]{2}-[0-9]{2})", raw_text)
+    if match:
+        return match.group(1)
+    match = re.search(r"([0-9]{4}-[0-9]{2}-[0-9]{2})", raw_text)
+    if match:
+        return match.group(1)
     return None
 
 
@@ -762,6 +786,14 @@ def _normalize_summary_text(raw_text: str) -> str:
     text = text.replace("\u202f", " ")
     text = text.replace("\r", "\n")
     text = re.sub(r"[ \t]+", " ", text)
+    return text
+
+
+def _clean_text_value(value: Any) -> str:
+    text = _normalize_summary_text(str(value or ""))
+    text = text.replace("*", "")
+    text = text.strip(" :-")
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
