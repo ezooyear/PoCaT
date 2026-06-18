@@ -17,7 +17,7 @@ DB_CONFIG = {
     "port": int(os.getenv("DB_PORT", "5432")),
     "database": os.getenv("DB_NAME", "postgres"),
     "user": os.getenv("DB_USER", "postgres"),
-    "password": os.getenv("DB_PASSWORD", "ghfj526127@"),
+    "password": os.getenv("DB_PASSWORD", ""),
 }
 
 # ─── 위험한 SQL 키워드 ───

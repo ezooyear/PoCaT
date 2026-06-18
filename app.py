@@ -1,13 +1,17 @@
 """
-Streamlit chat UI for the savings assistant.
+Customer dashboard and chat UI for the savings assistant.
 """
+
+from datetime import date
+from pathlib import Path
+from uuid import uuid4
 
 from dotenv import load_dotenv
 import streamlit as st
-from uuid import uuid4
 
 load_dotenv()
 
+from db.postgres_db import get_connection
 from graph.builder import build_graph
 from observability.langfuse import (
     flush_langfuse,
@@ -16,10 +20,13 @@ from observability.langfuse import (
 )
 
 
+PDF_DIR = Path(__file__).resolve().parent / "data" / "pdfs"
+
+
 st.set_page_config(
-    page_title="KB 예적금 상담 AI",
-    page_icon="🏦",
-    layout="centered",
+    page_title="KB 내 금융상품 도우미",
+    page_icon="KB",
+    layout="wide",
 )
 
 st.markdown(
@@ -29,33 +36,376 @@ st.markdown(
     #MainMenu { visibility: hidden; }
     footer { visibility: hidden; }
     .stDeployButton { display: none; }
-    .main-header { text-align: center; padding: 1rem 0 0.5rem 0; }
-    .main-header h1 {
-        font-size: 2rem;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
+
+    .block-container {
+        max-width: 1440px;
+        padding-top: 1.35rem;
+        padding-bottom: 3rem;
+    }
+
+    .hero {
+        border-bottom: 1px solid #e6e8ef;
+        padding: 0.2rem 0 1.1rem 0;
+        margin-bottom: 1.1rem;
+    }
+
+    .hero-label {
+        color: #6b7280;
+        font-size: 0.88rem;
+        font-weight: 700;
+        letter-spacing: 0;
         margin-bottom: 0.25rem;
     }
-    .main-header p { color: #888; font-size: 0.95rem; }
-    .divider {
-        border: none;
-        height: 1px;
-        background: linear-gradient(90deg, transparent, #667eea55, transparent);
-        margin: 0.5rem 0 1rem 0;
+
+    .hero h1 {
+        color: #151922;
+        font-size: 2.1rem;
+        line-height: 1.2;
+        margin: 0 0 0.35rem 0;
+    }
+
+    .hero p {
+        color: #5f6673;
+        font-size: 1rem;
+        margin: 0;
+    }
+
+    .section-title {
+        color: #222631;
+        font-size: 1rem;
+        font-weight: 750;
+        margin: 0.35rem 0 0.7rem 0;
+    }
+
+    .panel {
+        border: 1px solid #e2e6ef;
+        border-radius: 8px;
+        background: #ffffff;
+        padding: 1rem;
+        margin-bottom: 0.9rem;
+    }
+
+    .profile-name {
+        color: #171b24;
+        font-size: 1.2rem;
+        font-weight: 800;
+        margin: 0.45rem 0 0.25rem 0;
+    }
+
+    .profile-meta {
+        color: #69717f;
+        font-size: 0.9rem;
+        margin-bottom: 0.9rem;
+    }
+
+    .status-pill {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        padding: 0.22rem 0.62rem;
+        background: #ecfdf3;
+        color: #157347;
+        font-size: 0.78rem;
+        font-weight: 750;
+    }
+
+    .metric-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 0.65rem;
+    }
+
+    .metric {
+        border: 1px solid #e8ebf2;
+        border-radius: 8px;
+        padding: 0.75rem;
+        background: #fafbfe;
+    }
+
+    .metric-label {
+        color: #737b89;
+        font-size: 0.78rem;
+        margin-bottom: 0.2rem;
+    }
+
+    .metric-value {
+        color: #181c25;
+        font-size: 1.05rem;
+        font-weight: 800;
+    }
+
+    .insight-band {
+        border: 1px solid #e3e7ef;
+        border-radius: 8px;
+        background: #fbfcff;
+        padding: 0.95rem 1rem;
+        margin-bottom: 0.9rem;
+    }
+
+    .insight-band strong {
+        color: #20242e;
+    }
+
+    .insight-band p {
+        color: #5f6673;
+        margin: 0.25rem 0 0 0;
+        line-height: 1.55;
+    }
+
+    .journey-step {
+        display: flex;
+        gap: 0.65rem;
+        padding: 0.55rem 0;
+        border-bottom: 1px solid #eef1f6;
+    }
+
+    .journey-step:last-child {
+        border-bottom: none;
+    }
+
+    .step-number {
+        flex: 0 0 auto;
+        width: 1.55rem;
+        height: 1.55rem;
+        border-radius: 999px;
+        background: #ffcc00;
+        color: #222;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.82rem;
+        font-weight: 800;
+    }
+
+    .step-copy strong {
+        color: #20242e;
+        display: block;
+        font-size: 0.9rem;
+        line-height: 1.35;
+    }
+
+    .step-copy span {
+        color: #6d7582;
+        display: block;
+        font-size: 0.82rem;
+        line-height: 1.4;
+        margin-top: 0.12rem;
+    }
+
+    .empty-dashboard {
+        border: 1px dashed #cfd6e4;
+        border-radius: 8px;
+        background: #fbfcff;
+        color: #626b79;
+        padding: 1.25rem;
+        line-height: 1.55;
+    }
+
+    .chat-label {
+        color: #69717f;
+        font-size: 0.78rem;
+        font-weight: 750;
+        margin: 0.75rem 0 0.25rem 0;
+    }
+
+    .chat-bubble {
+        border: 1px solid #e3e7ef;
+        border-radius: 8px;
+        padding: 0.78rem 0.9rem;
+        margin-bottom: 0.45rem;
+        line-height: 1.55;
+    }
+
+    .chat-bubble.user {
+        background: #fff8d8;
+        border-color: #f3de8a;
+    }
+
+    .chat-bubble.assistant {
+        background: #fbfcff;
+    }
+
+    .chat-scroll-hint {
+        color: #7a8391;
+        font-size: 0.78rem;
+        margin: -0.2rem 0 0.55rem 0;
+    }
+
+    .account-table-header {
+        border: 1px solid #e2e6ef;
+        border-radius: 8px 8px 0 0;
+        background: #f6f8fc;
+        padding: 0.55rem 0.75rem;
+        margin-top: 0.2rem;
+        font-size: 0.78rem;
+        font-weight: 800;
+        color: #596273;
+    }
+
+    .account-row {
+        border-left: 1px solid #e2e6ef;
+        border-right: 1px solid #e2e6ef;
+        border-bottom: 1px solid #e2e6ef;
+        background: #ffffff;
+        padding: 0.42rem 0.75rem;
+        font-size: 0.86rem;
+        color: #171b24;
+    }
+
+    .account-row.selected {
+        background: #fff8d8;
+        border-color: #ffcc00;
+    }
+
+    .account-row:last-of-type {
+        border-radius: 0 0 8px 8px;
+    }
+
+    .account-cell-muted {
+        color: #69717f;
+        font-size: 0.82rem;
+    }
+
+    .detail-hero {
+        border: 1px solid #e2e6ef;
+        border-radius: 8px;
+        background: #ffffff;
+        padding: 1rem;
+        margin: 0.7rem 0 0.75rem 0;
+    }
+
+    .detail-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.65rem;
+        margin-bottom: 0.85rem;
+    }
+
+    .detail-card {
+        border: 1px solid #e8ebf2;
+        border-radius: 8px;
+        background: #fafbfe;
+        padding: 0.85rem;
+        min-height: 5.6rem;
+    }
+
+    .detail-card-label {
+        color: #69717f;
+        font-size: 0.76rem;
+        font-weight: 800;
+        margin-bottom: 0.35rem;
+    }
+
+    .detail-card-value {
+        color: #171b24;
+        font-size: 1rem;
+        font-weight: 850;
+        line-height: 1.35;
+    }
+
+    .detail-card-note {
+        color: #69717f;
+        font-size: 0.78rem;
+        line-height: 1.4;
+        margin-top: 0.35rem;
+    }
+
+    .detail-status-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.55rem;
+        margin-top: 0.75rem;
+    }
+
+    .detail-status {
+        border: 1px solid #e8ebf2;
+        border-radius: 8px;
+        padding: 0.65rem;
+        background: #ffffff;
+    }
+
+    .recommend-card {
+        border: 1px solid #e2e6ef;
+        border-radius: 8px;
+        background: #ffffff;
+        padding: 0.8rem;
+        margin-bottom: 0.55rem;
+    }
+
+    .recommend-rank {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 1.55rem;
+        height: 1.55rem;
+        border-radius: 999px;
+        background: #ffcc00;
+        color: #171b24;
+        font-weight: 850;
+        font-size: 0.82rem;
+        margin-right: 0.45rem;
+    }
+
+    .recommend-title {
+        color: #171b24;
+        font-size: 0.94rem;
+        font-weight: 850;
+        line-height: 1.35;
+    }
+
+    .recommend-meta {
+        color: #69717f;
+        font-size: 0.8rem;
+        line-height: 1.45;
+        margin-top: 0.35rem;
+    }
+
+    .recommend-reason {
+        color: #171b24;
+        font-size: 0.82rem;
+        line-height: 1.45;
+        margin-top: 0.45rem;
+    }
+
+    .stButton > button,
+    .stFormSubmitButton > button,
+    .stDownloadButton > button {
+        width: 100%;
+        border-radius: 8px;
+        border: 1px solid #d8dde8;
+        background: #ffffff;
+        color: #222631;
+        font-weight: 650;
+        min-height: 2.55rem;
+    }
+
+    .stButton > button:hover,
+    .stFormSubmitButton > button:hover,
+    .stDownloadButton > button:hover {
+        border-color: #ffcc00;
+        color: #171b24;
+    }
+
+    [data-testid="stChatInput"] {
+        border-top: 1px solid #eef1f6;
+        padding-top: 0.75rem;
+    }
+
+    @media (max-width: 780px) {
+        .metric-row {
+            grid-template-columns: 1fr;
+        }
+
+        .hero h1 {
+            font-size: 1.7rem;
+        }
+
+        .detail-grid,
+        .detail-status-grid {
+            grid-template-columns: 1fr;
+        }
     }
 </style>
-""",
-    unsafe_allow_html=True,
-)
-
-st.markdown(
-    """
-<div class="main-header">
-    <h1>🏦 예적금 상담 AI</h1>
-    <p>예적금 관련 궁금한 점을 자유롭게 질문해 주세요</p>
-</div>
-<hr class="divider">
 """,
     unsafe_allow_html=True,
 )
@@ -73,8 +423,741 @@ if "conversation_messages" not in st.session_state:
 if "langfuse_session_id" not in st.session_state:
     st.session_state.langfuse_session_id = f"streamlit-{uuid4().hex}"
 
+if "selected_customer" not in st.session_state:
+    st.session_state.selected_customer = None
 
-def _build_next_conversation(messages: list, latest_user_prompt: str, latest_ai_content: str) -> list[tuple[str, str]]:
+if "customer_lookup_error" not in st.session_state:
+    st.session_state.customer_lookup_error = None
+
+if "selected_account_index" not in st.session_state:
+    st.session_state.selected_account_index = None
+
+if "dark_mode" not in st.session_state:
+    st.session_state.dark_mode = False
+
+
+def _theme_values() -> dict[str, str]:
+    if st.session_state.dark_mode:
+        return {
+            "app_bg": "#0f141c",
+            "surface": "#171d27",
+            "surface_soft": "#111722",
+            "surface_muted": "#202838",
+            "border": "#2b3546",
+            "border_soft": "#263142",
+            "text": "#eef2f7",
+            "text_soft": "#b8c0cc",
+            "text_muted": "#8f9aab",
+            "accent": "#ffcc00",
+            "user_bubble": "#3a3020",
+            "assistant_bubble": "#151b25",
+            "success_bg": "#123525",
+            "success_text": "#7ee0a2",
+            "input_bg": "#111722",
+        }
+
+    return {
+        "app_bg": "#ffffff",
+        "surface": "#ffffff",
+        "surface_soft": "#fbfcff",
+        "surface_muted": "#fafbfe",
+        "border": "#e2e6ef",
+        "border_soft": "#eef1f6",
+        "text": "#171b24",
+        "text_soft": "#5f6673",
+        "text_muted": "#69717f",
+        "accent": "#ffcc00",
+        "user_bubble": "#fff8d8",
+        "assistant_bubble": "#fbfcff",
+        "success_bg": "#ecfdf3",
+        "success_text": "#157347",
+        "input_bg": "#ffffff",
+    }
+
+
+def _apply_theme() -> None:
+    theme = _theme_values()
+    st.markdown(
+        f"""
+<style>
+    .stApp {{
+        background: {theme["app_bg"]};
+        color: {theme["text"]};
+    }}
+
+    .block-container {{
+        color: {theme["text"]} !important;
+    }}
+
+    .stApp,
+    .stApp p,
+    .stApp span,
+    .stApp div,
+    .stApp label,
+    .stApp li,
+    .stApp h1,
+    .stApp h2,
+    .stApp h3,
+    .stApp h4,
+    .stApp h5,
+    .stApp h6,
+    [data-testid="stMarkdownContainer"],
+    [data-testid="stMarkdownContainer"] p {{
+        color: {theme["text"]};
+    }}
+
+    .hero {{
+        border-bottom-color: {theme["border"]};
+    }}
+
+    .hero-label,
+    .profile-meta,
+    .metric-label,
+    .step-copy span,
+    .chat-label,
+    .chat-scroll-hint,
+    [data-testid="stCaptionContainer"],
+    [data-testid="stCaptionContainer"] * {{
+        color: {theme["text_muted"]} !important;
+    }}
+
+    .hero h1,
+    .section-title,
+    .profile-name,
+    .metric-value,
+    .step-copy strong,
+    .insight-band strong {{
+        color: {theme["text"]};
+    }}
+
+    .hero p,
+    .insight-band p {{
+        color: {theme["text_soft"]};
+    }}
+
+    .panel,
+    .insight-band {{
+        background: {theme["surface"]} !important;
+        border-color: {theme["border"]} !important;
+    }}
+
+    .metric {{
+        background: {theme["surface_muted"]} !important;
+        border-color: {theme["border"]} !important;
+    }}
+
+    .empty-dashboard {{
+        background: {theme["surface_soft"]};
+        border-color: {theme["border"]};
+        color: {theme["text_soft"]};
+    }}
+
+    .account-table-header {{
+        background: {theme["surface_muted"]} !important;
+        border-color: {theme["border"]} !important;
+        color: {theme["text_muted"]} !important;
+    }}
+
+    .account-table-header * {{
+        color: {theme["text_muted"]} !important;
+    }}
+
+    .account-row {{
+        background: {theme["surface"]} !important;
+        border-color: {theme["border"]} !important;
+        color: {theme["text"]} !important;
+    }}
+
+    .account-row.selected {{
+        background: {theme["user_bubble"]} !important;
+        border-color: {theme["accent"]} !important;
+    }}
+
+    .account-row *,
+    .account-cell-muted {{
+        color: {theme["text"]} !important;
+    }}
+
+    .detail-hero {{
+        background: {theme["surface"]} !important;
+        border-color: {theme["border"]} !important;
+    }}
+
+    .detail-card {{
+        background: {theme["surface_muted"]} !important;
+        border-color: {theme["border"]} !important;
+    }}
+
+    .detail-status {{
+        background: {theme["surface"]} !important;
+        border-color: {theme["border"]} !important;
+    }}
+
+    .detail-card-label,
+    .detail-card-note {{
+        color: {theme["text_muted"]} !important;
+    }}
+
+    .detail-card-value,
+    .detail-card-value * {{
+        color: {theme["text"]} !important;
+    }}
+
+    .recommend-card {{
+        background: {theme["surface"]} !important;
+        border-color: {theme["border"]} !important;
+    }}
+
+    .recommend-title,
+    .recommend-reason {{
+        color: {theme["text"]} !important;
+    }}
+
+    .recommend-meta {{
+        color: {theme["text_muted"]} !important;
+    }}
+
+    .journey-step {{
+        border-bottom-color: {theme["border_soft"]};
+    }}
+
+    .status-pill {{
+        background: {theme["success_bg"]};
+        color: {theme["success_text"]};
+    }}
+
+    .chat-bubble {{
+        border-color: {theme["border"]};
+        color: {theme["text"]} !important;
+    }}
+
+    .chat-bubble * {{
+        color: {theme["text"]} !important;
+    }}
+
+    .chat-bubble.user {{
+        background: {theme["user_bubble"]};
+        border-color: {theme["accent"]};
+    }}
+
+    .chat-bubble.assistant {{
+        background: {theme["assistant_bubble"]};
+    }}
+
+    .stButton > button,
+    .stFormSubmitButton > button,
+    .stDownloadButton > button {{
+        background: {theme["surface"]} !important;
+        border-color: {theme["border"]} !important;
+        color: {theme["text"]} !important;
+    }}
+
+    .stButton > button *,
+    .stFormSubmitButton > button *,
+    .stDownloadButton > button * {{
+        color: {theme["text"]} !important;
+    }}
+
+    .stButton > button:hover,
+    .stFormSubmitButton > button:hover,
+    .stDownloadButton > button:hover {{
+        border-color: {theme["accent"]};
+        color: {theme["text"]};
+    }}
+
+    .stDownloadButton > button {{
+        background: {theme["accent"]} !important;
+        border-color: {theme["accent"]} !important;
+        color: #171b24 !important;
+        font-weight: 800 !important;
+    }}
+
+    .stDownloadButton > button * {{
+        color: #171b24 !important;
+    }}
+
+    div[data-testid="stForm"],
+    div[data-testid="stVerticalBlockBorderWrapper"] {{
+        background: {theme["surface"]};
+        border-color: {theme["border"]};
+    }}
+
+    input,
+    textarea,
+    div[data-baseweb="select"] > div {{
+        background-color: {theme["input_bg"]} !important;
+        border-color: {theme["border"]} !important;
+        color: {theme["text"]} !important;
+    }}
+
+    input::placeholder,
+    textarea::placeholder {{
+        color: {theme["text_muted"]} !important;
+        opacity: 1 !important;
+    }}
+
+    div[data-baseweb="select"] *,
+    [data-testid="stTextInput"] *,
+    [data-testid="stMetric"] *,
+    [data-testid="stForm"] * {{
+        color: {theme["text"]};
+    }}
+
+    [data-testid="stDataFrame"] {{
+        color: {theme["text"]} !important;
+        background: {theme["surface"]} !important;
+    }}
+
+    [data-testid="stDataFrame"] * {{
+        color: {theme["text"]} !important;
+    }}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def _format_money(value: object) -> str:
+    if value is None:
+        return "-"
+
+    try:
+        return f"{int(value):,}원"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _format_rate(value: object) -> str:
+    if value is None:
+        return "-"
+
+    try:
+        return f"{float(value):.2f}%"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _format_date(value: object) -> str:
+    if value is None:
+        return "-"
+
+    return str(value)
+
+
+def _find_product_pdf(account: dict) -> Path | None:
+    document_key = str(account.get("rag_document_key") or "").strip()
+    candidates = []
+
+    if document_key:
+        key_path = Path(document_key)
+        if key_path.suffix.lower() == ".pdf":
+            candidates.append(PDF_DIR / key_path.name)
+        else:
+            candidates.append(PDF_DIR / f"{document_key}.pdf")
+
+    product_name = str(account.get("product_name") or "").replace(" ", "")
+    if product_name:
+        for pdf_path in PDF_DIR.glob("*.pdf"):
+            normalized_pdf_name = pdf_path.stem.replace(" ", "")
+            if product_name in normalized_pdf_name or normalized_pdf_name in product_name:
+                candidates.append(pdf_path)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    return None
+
+
+def _render_product_detail(account: dict) -> None:
+    product_name = account.get("product_name") or "상품명 미확인"
+    pdf_path = _find_product_pdf(account)
+
+    amount_range = _format_amount_range(account.get("min_amount"), account.get("max_amount"))
+    period_range = _format_period_range(account.get("min_period_months"), account.get("max_period_months"))
+    rate_range = _format_rate_range(account.get("base_rate"), account.get("max_rate"))
+    age_range = _format_age_range(account.get("age_min"), account.get("age_max"))
+
+    st.markdown(
+        f"""
+<div class="detail-hero">
+    <div class="profile-name">{product_name}</div>
+    <div class="profile-meta">
+        상품유형 {account.get("product_type", "-")} · 가입계좌 {account.get("account_number", "-")} · 적용금리 {_format_rate(account.get("applied_rate"))}
+    </div>
+    <div class="detail-grid">
+        <div class="detail-card">
+            <div class="detail-card-label">가입 가능 금액</div>
+            <div class="detail-card-value">{amount_range}</div>
+            <div class="detail-card-note">내 월 저축 가능액과 함께 확인</div>
+        </div>
+        <div class="detail-card">
+            <div class="detail-card-label">가입 가능 기간</div>
+            <div class="detail-card-value">{period_range}</div>
+            <div class="detail-card-note">현재 계약기간 {account.get("contract_months") or "-"}개월</div>
+        </div>
+        <div class="detail-card">
+            <div class="detail-card-label">금리 범위</div>
+            <div class="detail-card-value">{rate_range}</div>
+            <div class="detail-card-note">내 적용금리 {_format_rate(account.get("applied_rate"))}</div>
+        </div>
+    </div>
+    <div class="detail-grid">
+        <div class="detail-card">
+            <div class="detail-card-label">가입 연령</div>
+            <div class="detail-card-value">{age_range}</div>
+            <div class="detail-card-note">상품 기본 조건 기준</div>
+        </div>
+        <div class="detail-card">
+            <div class="detail-card-label">계좌 상태</div>
+            <div class="detail-card-value">{account.get("account_status", "-")}</div>
+            <div class="detail-card-note">만기·유지·추가 가입 확인 기준</div>
+        </div>
+        <div class="detail-card">
+            <div class="detail-card-label">현재 잔액</div>
+            <div class="detail-card-value">{_format_money(account.get("current_balance"))}</div>
+            <div class="detail-card-note">월 납입 {_format_money(account.get("monthly_amount"))}</div>
+        </div>
+    </div>
+    <div class="detail-status-grid">
+        <div class="detail-status">
+            <div class="detail-card-label">가입일</div>
+            <div class="detail-card-value">{_format_date(account.get("join_date"))}</div>
+        </div>
+        <div class="detail-status">
+            <div class="detail-card-label">만기일</div>
+            <div class="detail-card-value">{_format_date(account.get("maturity_date"))}</div>
+        </div>
+        <div class="detail-status">
+            <div class="detail-card-label">납입/예치 금액</div>
+            <div class="detail-card-value">{_format_money(account.get("monthly_amount") or account.get("deposit_amount"))}</div>
+        </div>
+        <div class="detail-status">
+            <div class="detail-card-label">다음 확인</div>
+            <div class="detail-card-value">만기·우대·추가가입</div>
+        </div>
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    if pdf_path:
+        st.download_button(
+            "약관 PDF 다운로드",
+            data=pdf_path.read_bytes(),
+            file_name=pdf_path.name,
+            mime="application/pdf",
+            type="primary",
+            use_container_width=True,
+        )
+    else:
+        st.info("연결된 약관 PDF를 찾지 못했습니다. 상품설명서 파일명을 확인해 주세요.")
+
+
+def _format_amount_range(min_amount: object, max_amount: object) -> str:
+    if min_amount is None and max_amount is None:
+        return "-"
+    if max_amount is None:
+        return f"{_format_money(min_amount)} 이상"
+    if min_amount is None:
+        return f"{_format_money(max_amount)} 이하"
+    return f"{_format_money(min_amount)}~{_format_money(max_amount)}"
+
+
+def _format_period_range(min_months: object, max_months: object) -> str:
+    if min_months is None and max_months is None:
+        return "-"
+    if max_months is None or max_months == min_months:
+        return f"{min_months or max_months}개월"
+    return f"{min_months}~{max_months}개월"
+
+
+def _format_rate_range(base_rate: object, max_rate: object) -> str:
+    if base_rate is None and max_rate is None:
+        return "-"
+    if max_rate is None or max_rate == base_rate:
+        return _format_rate(base_rate or max_rate)
+    return f"{_format_rate(base_rate)}~{_format_rate(max_rate)}"
+
+
+def _format_age_range(age_min: object, age_max: object) -> str:
+    if age_min is None and age_max is None:
+        return "제한 정보 없음"
+    parts = []
+    if age_min is not None:
+        parts.append(f"만 {age_min}세 이상")
+    if age_max is not None:
+        parts.append(f"만 {age_max}세 이하")
+    return " ".join(parts)
+
+
+def _calculate_age(birth_date: object) -> int | None:
+    if birth_date is None:
+        return None
+
+    try:
+        today = date.today()
+        return today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+    except AttributeError:
+        return None
+
+
+def _format_age_band(birth_date: object) -> str:
+    age = _calculate_age(birth_date)
+    if age is None:
+        return "나이대 미확인"
+    if age < 10:
+        return "10대 미만"
+    return f"{age // 10 * 10}대"
+
+
+def _is_soldier_customer(customer: dict) -> bool:
+    job_text = str(customer.get("customer_job") or "").strip().lower()
+    soldier_markers = ("군인", "직업군인", "장병", "부사관", "장교", "군간부", "병사", "하사", "중사", "대위")
+    return any(marker in job_text for marker in soldier_markers)
+
+
+def _is_military_only_product(product: dict) -> bool:
+    product_text = " ".join(
+        str(product.get(key) or "")
+        for key in ("product_name", "rag_document_key")
+    ).lower()
+    military_markers = ("군인", "직업군인", "장병", "장기간부", "군간부", "나라사랑")
+    return any(marker in product_text for marker in military_markers)
+
+
+def _is_soldier_tomorrow_savings(product: dict) -> bool:
+    product_text = " ".join(
+        str(product.get(key) or "")
+        for key in ("product_name", "rag_document_key")
+    )
+    normalized = product_text.replace(" ", "")
+    markers = ("장병내일준비적금", "장병내일적금", "장병준비내일적금")
+    return any(marker in normalized for marker in markers)
+
+
+def _is_product_allowed_for_customer_job(customer: dict, product: dict) -> bool:
+    if _is_military_only_product(product) and not _is_soldier_customer(customer):
+        return False
+    return True
+
+
+def _fetch_top_recommendable_products(customer: dict, limit: int = 3) -> list[dict]:
+    monthly_saving = customer.get("available_monthly_saving")
+    customer_age = _calculate_age(customer.get("birth_date"))
+    owned_product_ids = {
+        account.get("product_id")
+        for account in customer.get("accounts", [])
+        if account.get("product_id") is not None and str(account.get("account_status", "")).upper() == "ACTIVE"
+    }
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                product_id,
+                product_name,
+                product_type,
+                min_amount,
+                max_amount,
+                min_period_months,
+                max_period_months,
+                base_rate,
+                max_rate,
+                age_min,
+                age_max,
+                rag_document_key
+            FROM products
+            WHERE is_active = TRUE
+            ORDER BY COALESCE(max_rate, base_rate, 0) DESC, product_id
+            """
+        )
+        columns = [desc[0] for desc in cursor.description]
+        products = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        cursor.close()
+        conn.close()
+    except Exception:
+        return []
+
+    ranked = []
+    for product in products:
+        if product.get("product_id") in owned_product_ids:
+            continue
+
+        if not _is_product_allowed_for_customer_job(customer, product):
+            continue
+
+        if customer_age is not None and _is_soldier_tomorrow_savings(product) and customer_age >= 30:
+            continue
+
+        min_amount = product.get("min_amount")
+        max_amount = product.get("max_amount")
+        if monthly_saving is not None:
+            try:
+                saving_amount = int(monthly_saving)
+                if min_amount is not None and saving_amount < int(min_amount):
+                    continue
+                if max_amount is not None and saving_amount > int(max_amount):
+                    continue
+            except (TypeError, ValueError):
+                pass
+
+        if customer_age is not None:
+            age_min = product.get("age_min")
+            age_max = product.get("age_max")
+            if age_min is not None and customer_age < int(age_min):
+                continue
+            if age_max is not None and customer_age > int(age_max):
+                continue
+
+        score = float(product.get("max_rate") or product.get("base_rate") or 0)
+        ranked.append((score, product))
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [product for _score, product in ranked[:limit]]
+
+
+def _render_top_recommendations(customer: dict | None) -> None:
+    st.markdown('<div class="section-title">내 조건에 맞는 상품 후보 TOP 3</div>', unsafe_allow_html=True)
+    st.caption("이 영역은 내 기본 조건을 빠르게 대조한 후보입니다. 최종 추천 판단은 AI 상담에서 가입 가능 여부와 우대조건을 함께 확인하세요.")
+
+    if not customer:
+        st.info("내 계정을 불러오면 조건 충족 상품 후보 TOP 3가 표시됩니다.")
+        return
+
+    products = _fetch_top_recommendable_products(customer)
+    if not products:
+        st.info("현재 조건으로 후보 상품을 찾지 못했습니다.")
+        return
+
+    for rank, product in enumerate(products, 1):
+        pdf_path = _find_product_pdf(product)
+        st.markdown(
+            f"""
+<div class="recommend-card">
+    <div>
+        <span class="recommend-rank">{rank}</span>
+        <span class="recommend-title">{product.get("product_name", "-")}</span>
+    </div>
+    <div class="recommend-meta">
+        {product.get("product_type", "-")} · 금리 {_format_rate_range(product.get("base_rate"), product.get("max_rate"))} ·
+        기간 {_format_period_range(product.get("min_period_months"), product.get("max_period_months"))}
+    </div>
+    <div class="recommend-reason">
+        내 월 저축 가능액과 연령 기준을 통과한 후보 상품입니다. 가입 전 우대조건과 세부 가입 가능 여부를 AI 상담에서 확인하세요.
+    </div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+        if pdf_path:
+            st.download_button(
+                f"{rank}위 후보 약관 PDF 다운로드",
+                data=pdf_path.read_bytes(),
+                file_name=pdf_path.name,
+                mime="application/pdf",
+                type="primary",
+                use_container_width=True,
+                key=f"recommend_pdf_{product.get('product_id', rank)}",
+            )
+        else:
+            st.caption(f"{product.get('product_name', '후보 상품')}의 연결된 약관 PDF를 찾지 못했습니다.")
+
+
+def _fetch_customer_dashboard(customer_number: str) -> tuple[dict | None, str | None]:
+    normalized = customer_number.strip()
+    if not normalized:
+        return None, "테스트 고객번호를 입력해 주세요."
+
+    if not normalized.isdigit():
+        return None, "테스트 고객번호는 숫자로 입력해 주세요."
+
+    customer_id = int(normalized)
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                customer_id,
+                customer_name,
+                birth_date,
+                customer_job,
+                annual_income,
+                income_level,
+                main_bank_yn,
+                salary_transfer_yn,
+                auto_transfer_yn,
+                card_usage_yn,
+                marketing_agree_yn,
+                transaction_months,
+                available_monthly_saving
+            FROM customers
+            WHERE customer_id = %s;
+            """,
+            (customer_id,),
+        )
+        customer_row = cursor.fetchone()
+
+        if customer_row is None:
+            cursor.close()
+            conn.close()
+            return None, f"테스트 고객번호 {customer_id}번 계정을 찾을 수 없습니다."
+
+        customer_columns = [desc[0] for desc in cursor.description]
+        customer = dict(zip(customer_columns, customer_row))
+
+        cursor.execute(
+            """
+            SELECT
+                ca.account_id,
+                ca.account_number,
+                ca.product_id,
+                COALESCE(p.product_name, '상품명 미확인') AS product_name,
+                COALESCE(p.product_type, '유형 미확인') AS product_type,
+                p.min_amount,
+                p.max_amount,
+                p.min_period_months,
+                p.max_period_months,
+                p.base_rate,
+                p.max_rate,
+                p.age_min,
+                p.age_max,
+                p.rag_document_key,
+                ca.join_date,
+                ca.maturity_date,
+                ca.contract_months,
+                ca.monthly_amount,
+                ca.deposit_amount,
+                ca.current_balance,
+                ca.applied_rate,
+                ca.account_status
+            FROM customer_accounts ca
+            LEFT JOIN products p ON p.product_id = ca.product_id
+            WHERE ca.customer_id = %s
+            ORDER BY ca.account_status, ca.maturity_date NULLS LAST, ca.join_date DESC;
+            """,
+            (customer_id,),
+        )
+        account_columns = [desc[0] for desc in cursor.description]
+        accounts = [dict(zip(account_columns, row)) for row in cursor.fetchall()]
+
+        cursor.close()
+        conn.close()
+
+        customer["accounts"] = accounts
+        return customer, None
+    except Exception as error:
+        return None, f"내 계정 정보를 불러오는 중 오류가 발생했습니다: {error}"
+
+
+def _build_next_conversation(
+    messages: list, latest_user_prompt: str, latest_ai_content: str
+) -> list[tuple[str, str]]:
     preserved = []
 
     for msg in messages:
@@ -88,74 +1171,449 @@ def _build_next_conversation(messages: list, latest_user_prompt: str, latest_ai_
     return preserved
 
 
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"], avatar="🧑" if msg["role"] == "user" else "🤖"):
-        st.markdown(msg["content"])
+def _format_yn(value: object) -> str:
+    return "충족" if bool(value) else "미충족"
 
 
-if prompt := st.chat_input("궁금한 점을 입력해 주세요..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
+def _build_customer_prompt_context(customer: dict) -> str:
+    accounts = customer.get("accounts") or []
+    active_accounts = [
+        account
+        for account in accounts
+        if str(account.get("account_status", "")).upper() == "ACTIVE"
+    ]
+    account_lines = []
+    for account in active_accounts[:5]:
+        account_lines.append(
+            "- "
+            f"{account.get('product_name', '상품명 미확인')} "
+            f"({account.get('product_type', '-')}, 적용금리 {_format_rate(account.get('applied_rate'))}, "
+            f"만기 {_format_date(account.get('maturity_date'))}, 잔액 {_format_money(account.get('current_balance'))})"
+        )
 
-    with st.chat_message("user", avatar="🧑"):
-        st.markdown(prompt)
+    if not account_lines:
+        account_lines.append("- 현재 활성 가입 상품 없음")
 
-    st.session_state.conversation_messages.append(("user", prompt))
+    return "\n".join(
+        [
+            "[내 계정 요약]",
+            f"- 이름: {customer.get('customer_name', '-')}",
+            f"- 나이대: {_format_age_band(customer.get('birth_date'))}",
+            f"- 직업: {customer.get('customer_job', '-')}",
+            f"- 소득수준: {customer.get('income_level', '-')}",
+            f"- 거래 개월: {customer.get('transaction_months') or 0}개월",
+            f"- 월 저축 가능액: {_format_money(customer.get('available_monthly_saving'))}",
+            "",
+            "[현재 확인 가능한 우대조건 상태]",
+            f"- 주거래은행: {_format_yn(customer.get('main_bank_yn'))}",
+            f"- 급여이체: {_format_yn(customer.get('salary_transfer_yn'))}",
+            f"- 자동이체: {_format_yn(customer.get('auto_transfer_yn'))}",
+            f"- 카드사용: {_format_yn(customer.get('card_usage_yn'))}",
+            f"- 마케팅동의: {_format_yn(customer.get('marketing_agree_yn'))}",
+            "",
+            "[가입 중인 상품]",
+            *account_lines,
+        ]
+    )
 
-    with st.chat_message("assistant", avatar="🤖"):
-        with st.spinner("답변을 생성하고 있습니다..."):
-            try:
-                with langfuse_trace_context(
-                    trace_name="streamlit-chat-turn",
-                    session_id=st.session_state.langfuse_session_id,
-                    tags=["streamlit", "pocat"],
-                    metadata={
-                        "surface": "streamlit",
-                        "app": "pocat",
-                    },
-                ):
-                    with langfuse_observation(
-                        name="streamlit_chat_turn",
-                        as_type="span",
-                        input={
-                            "prompt": prompt,
-                            "conversation_length": len(st.session_state.conversation_messages),
-                        },
-                        metadata={"surface": "streamlit"},
-                    ) as observation:
-                        result = st.session_state.graph.invoke(
-                            {
-                                "messages": st.session_state.conversation_messages,
-                                "next": "",
-                                "member_id": None,
-                                "context": None,
-                                "plan": [],
-                                "current_step": 0,
-                                "agent_outputs": {},
-                            }
-                        )
 
-                ai_message = result["messages"][-1]
-                ai_content = ai_message.content if hasattr(ai_message, "content") else str(ai_message)
-                ai_content = ai_content.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+def _render_chat_message(role: str, content: str) -> None:
+    label = "나" if role == "user" else "AI 금융 도우미"
+    bubble_class = "user" if role == "user" else "assistant"
+    st.markdown(f'<div class="chat-label">{label}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="chat-bubble {bubble_class}">', unsafe_allow_html=True)
+    st.markdown(content)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-                if observation is not None:
-                    observation.update(
-                        output={
-                            "response_preview": ai_content[:500],
-                            "message_count": len(result.get("messages") or []),
-                        }
-                    )
 
-                st.markdown(ai_content)
-                st.session_state.messages.append({"role": "assistant", "content": ai_content})
-                st.session_state.conversation_messages = _build_next_conversation(
-                    st.session_state.messages[:-2],
-                    prompt,
-                    ai_content,
+def _run_assistant(prompt: str) -> str:
+    selected_customer = st.session_state.selected_customer
+    graph_prompt = prompt
+
+    if selected_customer:
+        customer_name = selected_customer.get("customer_name")
+        customer_id = selected_customer.get("customer_id")
+        customer_context = _build_customer_prompt_context(selected_customer)
+        graph_prompt = (
+            f"현재 로그인한 고객은 {customer_name}(테스트 고객번호 {customer_id})입니다.\n"
+            f"고객 본인이 이해하기 쉬운 말투로, 이 고객의 가입 상품과 조건을 반영해서 답변해 주세요.\n"
+            f"특히 우대금리 질문에는 아래 우대조건 상태를 근거로 '충족/미충족/추가 확인 필요'를 구분해 답변하세요.\n"
+            f"정확한 상품별 우대금리 세부 항목을 모르면 모른다고만 끝내지 말고, 현재 확인 가능한 조건과 다음 확인 항목을 안내하세요.\n\n"
+            f"{customer_context}\n\n"
+            f"사용자 질문: {prompt}"
+        )
+
+    st.session_state.conversation_messages.append(("user", graph_prompt))
+
+    with langfuse_trace_context(
+        trace_name="streamlit-chat-turn",
+        session_id=st.session_state.langfuse_session_id,
+        tags=["streamlit", "pocat"],
+        metadata={
+            "surface": "streamlit",
+            "app": "pocat",
+        },
+    ):
+        with langfuse_observation(
+            name="streamlit_chat_turn",
+            as_type="span",
+            input={
+                "prompt": graph_prompt,
+                "conversation_length": len(st.session_state.conversation_messages),
+            },
+            metadata={"surface": "streamlit"},
+        ) as observation:
+            result = st.session_state.graph.invoke(
+                {
+                    "messages": st.session_state.conversation_messages,
+                    "next": "",
+                    "member_id": str(selected_customer.get("customer_id")) if selected_customer else None,
+                    "customer_id": selected_customer.get("customer_id") if selected_customer else None,
+                    "context": None,
+                    "plan": [],
+                    "current_step": 0,
+                    "agent_outputs": {},
+                }
+            )
+
+            ai_message = result["messages"][-1]
+            ai_content = ai_message.content if hasattr(ai_message, "content") else str(ai_message)
+            ai_content = ai_content.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+
+            if observation is not None:
+                observation.update(
+                    output={
+                        "response_preview": ai_content[:500],
+                        "message_count": len(result.get("messages") or []),
+                    }
                 )
-                flush_langfuse()
-            except Exception as error:
-                error_msg = f"오류가 발생했습니다: {error}"
-                st.error(error_msg)
-                st.session_state.messages.append({"role": "assistant", "content": error_msg})
-                flush_langfuse()
+
+    flush_langfuse()
+    return ai_content
+
+
+def _render_chat_loading() -> None:
+    st.markdown('<div class="chat-label">AI 금융 도우미</div>', unsafe_allow_html=True)
+    st.markdown('<div class="chat-bubble assistant">답변을 생성하고 있습니다...</div>', unsafe_allow_html=True)
+
+
+def _handle_prompt(prompt: str, chat_container=None) -> None:
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    assistant_slot = None
+
+    if chat_container is not None:
+        with chat_container:
+            _render_chat_message("user", prompt)
+            assistant_slot = st.empty()
+            with assistant_slot.container():
+                _render_chat_loading()
+
+    with st.spinner("내 상황에 맞는 답변을 준비하고 있습니다."):
+        try:
+            ai_content = _run_assistant(prompt)
+            st.session_state.messages.append({"role": "assistant", "content": ai_content})
+            st.session_state.conversation_messages = _build_next_conversation(
+                st.session_state.messages[:-2],
+                prompt,
+                ai_content,
+            )
+            if assistant_slot is not None:
+                assistant_slot.empty()
+                with assistant_slot.container():
+                    _render_chat_message("assistant", ai_content)
+        except Exception as error:
+            error_msg = f"답변을 생성하는 중 오류가 발생했습니다: {error}"
+            st.error(error_msg)
+            st.session_state.messages.append({"role": "assistant", "content": error_msg})
+            if assistant_slot is not None:
+                assistant_slot.empty()
+                with assistant_slot.container():
+                    _render_chat_message("assistant", error_msg)
+            flush_langfuse()
+
+
+_apply_theme()
+
+toolbar_left, toolbar_right = st.columns([0.74, 0.26])
+with toolbar_right:
+    theme_button_label = "라이트 모드로 전환" if st.session_state.dark_mode else "야간 모드로 전환"
+    if st.button(theme_button_label, key="theme_toggle_button"):
+        st.session_state.dark_mode = not st.session_state.dark_mode
+        st.rerun()
+
+st.markdown(
+    """
+<div class="hero">
+    <div class="hero-label">KB 내 금융상품 도우미</div>
+    <h1>내 상품과 가입 조건을 한눈에</h1>
+    <p>내가 가입한 상품을 확인하고, 궁금한 점은 AI 금융 도우미에게 바로 물어보세요.</p>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+overview_page, chat_page = st.tabs(["1. 내 상품", "2. AI 상담"])
+
+with overview_page:
+    st.markdown('<div class="section-title">내 금융상품</div>', unsafe_allow_html=True)
+    st.markdown(
+        """
+<div class="insight-band">
+    <strong>내 가입 상품과 조건에 맞는 상품 후보를 확인하는 페이지입니다.</strong>
+    <p>테스트 계정을 불러오면 내 프로필, 가입 상품, 선택 상품 상세, 조건 충족 상품 후보 TOP 3를 함께 확인할 수 있습니다.</p>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    with st.form("customer_lookup_form", clear_on_submit=False):
+        lookup_col, button_col = st.columns([0.76, 0.24])
+        with lookup_col:
+            customer_number = st.text_input(
+                "테스트 고객번호",
+                placeholder="테스트 고객번호 예: 1",
+                label_visibility="collapsed",
+            )
+        with button_col:
+            lookup_submitted = st.form_submit_button("내 계정 불러오기")
+
+    if lookup_submitted:
+        customer, error = _fetch_customer_dashboard(customer_number)
+        st.session_state.selected_customer = customer
+        st.session_state.customer_lookup_error = error
+
+        if customer:
+            st.session_state.messages = []
+            st.session_state.conversation_messages = []
+            st.session_state.selected_account_index = None
+
+    if st.session_state.customer_lookup_error:
+        st.error(st.session_state.customer_lookup_error)
+
+    customer = st.session_state.selected_customer
+
+    if not customer:
+        st.markdown(
+            """
+<div class="empty-dashboard">
+    테스트 고객번호를 입력하면 내 프로필, 거래 조건, 가입 상품 현황이 표시됩니다.
+    조건 충족 상품 후보와 AI 상담은 불러온 내 계정 정보를 바탕으로 동작합니다.
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+    else:
+        customer_col, recommend_col = st.columns([0.62, 0.38], gap="large")
+        accounts = customer.get("accounts") or []
+        active_accounts = [
+            account
+            for account in accounts
+            if str(account.get("account_status", "")).upper() == "ACTIVE"
+        ]
+        total_balance = sum(int(account.get("current_balance") or 0) for account in active_accounts)
+        monthly_total = sum(int(account.get("monthly_amount") or 0) for account in active_accounts)
+
+        with customer_col:
+            st.markdown(
+                f"""
+<div class="panel">
+    <span class="status-pill">계정 연결 완료</span>
+    <div class="profile-name">{customer.get("customer_name", "-")}</div>
+    <div class="profile-meta">
+        {_format_age_band(customer.get("birth_date"))} · {customer.get("customer_job", "-")} ·
+        소득수준 {customer.get("income_level", "-")}
+    </div>
+    <div class="metric-row">
+        <div class="metric">
+            <div class="metric-label">가입 상품</div>
+            <div class="metric-value">{len(accounts)}개</div>
+        </div>
+        <div class="metric">
+            <div class="metric-label">활성 계좌 잔액</div>
+            <div class="metric-value">{_format_money(total_balance)}</div>
+        </div>
+        <div class="metric">
+            <div class="metric-label">월 납입 합계</div>
+            <div class="metric-value">{_format_money(monthly_total)}</div>
+        </div>
+    </div>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+
+            condition_col_1, condition_col_2, condition_col_3 = st.columns(3)
+            condition_col_1.metric("거래 개월", f"{customer.get('transaction_months') or 0}개월")
+            condition_col_2.metric("연소득", f"{customer.get('annual_income') or 0:,}만원")
+            condition_col_3.metric("월 저축 가능액", _format_money(customer.get("available_monthly_saving")))
+
+            st.markdown('<div class="section-title">내 우대조건 상태</div>', unsafe_allow_html=True)
+            bonus_cols = st.columns(5)
+            bonus_statuses = [
+                ("주거래", customer.get("main_bank_yn")),
+                ("급여이체", customer.get("salary_transfer_yn")),
+                ("자동이체", customer.get("auto_transfer_yn")),
+                ("카드사용", customer.get("card_usage_yn")),
+                ("마케팅동의", customer.get("marketing_agree_yn")),
+            ]
+            for bonus_col, (label, value) in zip(bonus_cols, bonus_statuses):
+                bonus_col.metric(label, _format_yn(value))
+
+            st.markdown('<div class="section-title">가입 상품 현황</div>', unsafe_allow_html=True)
+
+            if not accounts:
+                st.info("현재 가입 중인 상품이 없습니다.")
+            else:
+                st.caption("상품명을 클릭하면 상품 요약과 약관 PDF 다운로드가 표시됩니다.")
+                st.markdown(
+                    """
+<div class="account-table-header">
+    <div style="display:grid; grid-template-columns: 2.1fr 0.7fr 0.85fr 1fr 1fr 0.9fr 1fr; gap:0.7rem; align-items:center;">
+        <div>상품명</div>
+        <div>유형</div>
+        <div>상태</div>
+        <div>가입일</div>
+        <div>만기일</div>
+        <div>금리</div>
+        <div>잔액</div>
+    </div>
+</div>
+""",
+                    unsafe_allow_html=True,
+                )
+
+                for index, account in enumerate(accounts):
+                    with st.container(border=True):
+                        row_cols = st.columns([2.1, 0.7, 0.85, 1, 1, 0.9, 1])
+                        with row_cols[0]:
+                            if st.button(
+                                account.get("product_name", "상품명 미확인"),
+                                key=f"account_detail_{account.get('account_id', index)}",
+                                use_container_width=True,
+                            ):
+                                st.session_state.selected_account_index = index
+                        row_cols[1].markdown(f"**{account.get('product_type', '-')}**")
+                        row_cols[2].markdown(f"**{account.get('account_status', '-')}**")
+                        row_cols[3].markdown(_format_date(account.get("join_date")))
+                        row_cols[4].markdown(_format_date(account.get("maturity_date")))
+                        row_cols[5].markdown(_format_rate(account.get("applied_rate")))
+                        row_cols[6].markdown(_format_money(account.get("current_balance")))
+
+                selected_index = st.session_state.selected_account_index
+                if selected_index is not None and 0 <= selected_index < len(accounts):
+                    selected_account = accounts[selected_index]
+                    _render_product_detail(selected_account)
+
+        with recommend_col:
+            _render_top_recommendations(customer)
+
+            st.markdown('<div class="section-title">내가 확인할 항목</div>', unsafe_allow_html=True)
+            st.markdown(
+                """
+<div class="panel">
+    <div class="journey-step">
+        <div class="step-number">1</div>
+        <div class="step-copy">
+            <strong>가입 상품 점검</strong>
+            <span>만기, 금리, 납입액을 보고 유지할지 추가 가입을 알아볼지 확인합니다.</span>
+        </div>
+    </div>
+    <div class="journey-step">
+        <div class="step-number">2</div>
+        <div class="step-copy">
+            <strong>우대조건 확인</strong>
+            <span>급여이체, 자동이체, 카드사용 등 내가 충족할 수 있는 조건을 확인합니다.</span>
+        </div>
+    </div>
+    <div class="journey-step">
+        <div class="step-number">3</div>
+        <div class="step-copy">
+            <strong>다음 행동 확인</strong>
+            <span>내 상황에 맞는 추가 납입, 만기 관리, 상품 후보를 AI 상담에서 확인합니다.</span>
+        </div>
+    </div>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+
+with chat_page:
+    selected_name = (
+        st.session_state.selected_customer.get("customer_name")
+        if st.session_state.selected_customer
+        else "계정 미연결"
+    )
+    st.markdown(f'<div class="section-title">AI 금융 상담 · {selected_name}</div>', unsafe_allow_html=True)
+    st.markdown(
+        """
+<div class="insight-band">
+    <strong>내 상품과 가입 조건에 대해 궁금한 점을 물어보는 공간입니다.</strong>
+    <p>1페이지에서 내 계정을 불러오면 AI 금융 도우미가 내 가입 상품과 조건을 반영해 답변합니다.</p>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    if st.session_state.selected_customer:
+        customer = st.session_state.selected_customer
+        accounts = customer.get("accounts") or []
+        active_accounts = [
+            account
+            for account in accounts
+            if str(account.get("account_status", "")).upper() == "ACTIVE"
+        ]
+        total_balance = sum(int(account.get("current_balance") or 0) for account in active_accounts)
+        summary_col_1, summary_col_2, summary_col_3, summary_col_4 = st.columns(4)
+        summary_col_1.metric("내 계정", customer.get("customer_id", "-"))
+        summary_col_2.metric("가입 상품", f"{len(accounts)}개")
+        summary_col_3.metric("활성 잔액", _format_money(total_balance))
+        summary_col_4.metric("월 저축 가능액", _format_money(customer.get("available_monthly_saving")))
+    else:
+        st.info("내 계정 정보가 필요한 질문은 1페이지에서 테스트 계정을 먼저 불러온 뒤 사용할 수 있습니다.")
+
+    st.markdown('<div class="chat-scroll-hint">대화 내역은 이 영역 안에서 스크롤됩니다.</div>', unsafe_allow_html=True)
+    chat_history = st.container(height=620, border=True)
+
+    prompt = None
+
+    with st.form("chat_prompt_form", clear_on_submit=True):
+        input_col, submit_col = st.columns([0.86, 0.14])
+        with input_col:
+            typed_prompt = st.text_input(
+                "질문",
+                placeholder="예: 내가 받을 수 있는 우대금리 조건을 알려줘",
+                label_visibility="collapsed",
+            )
+        with submit_col:
+            submitted = st.form_submit_button(">")
+
+    if submitted:
+        prompt = typed_prompt.strip()
+        if not prompt:
+            st.warning("질문을 입력해 주세요.")
+
+    st.caption("추천 질문")
+    suggested_prompts = [
+        ("내 상품 요약", "내가 가입한 상품 현황과 꼭 확인해야 할 내용을 쉽게 요약해줘."),
+        ("나에게 맞는 상품", "내 가입 상품, 월 저축 가능액, 가입 가능 조건을 종합해서 나에게 추천할 만한 예적금 상품을 순위와 이유, 주의사항까지 알려줘."),
+        ("만기 전에 할 일", "내 만기 예정 상품이 있다면 만기 전에 확인해야 할 체크포인트를 알려줘."),
+        ("우대조건 확인", "내 계정의 주거래은행, 급여이체, 자동이체, 카드사용, 마케팅동의 상태를 기준으로 현재 충족한 우대조건과 추가로 확인해야 할 조건을 나눠서 알려줘."),
+    ]
+    suggestion_cols = st.columns(2)
+    for index, (label, suggested_prompt) in enumerate(suggested_prompts):
+        with suggestion_cols[index % 2]:
+            if st.button(label, key=f"suggested_prompt_{index}", use_container_width=True):
+                if st.session_state.selected_customer:
+                    prompt = suggested_prompt
+                else:
+                    st.warning("추천 질문은 내 계정을 먼저 불러온 뒤 사용할 수 있습니다.")
+
+    with chat_history:
+        if not st.session_state.messages and not prompt:
+            st.info("대화 내역이 없습니다. 내 계정을 불러온 뒤 궁금한 점을 입력해 주세요.")
+
+        for msg in st.session_state.messages:
+            _render_chat_message(msg["role"], msg["content"])
+
+    if prompt:
+        _handle_prompt(prompt, chat_history)
