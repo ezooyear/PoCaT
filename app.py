@@ -4,6 +4,7 @@ Customer dashboard and chat UI for the savings assistant.
 
 from datetime import date
 from pathlib import Path
+import re
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -223,6 +224,18 @@ st.markdown(
 
     .chat-bubble.assistant {
         background: #fbfcff;
+    }
+
+    .chat-bubble pre,
+    .chat-bubble code {
+        background: #f6f8fc !important;
+        color: #171b24 !important;
+        border: 1px solid #e2e6ef;
+    }
+
+    .chat-bubble pre:empty,
+    .chat-bubble code:empty {
+        display: none !important;
     }
 
     .chat-scroll-hint {
@@ -642,6 +655,23 @@ def _apply_theme() -> None:
 
     .chat-bubble.assistant {{
         background: {theme["assistant_bubble"]};
+    }}
+
+    .chat-bubble pre,
+    .chat-bubble code,
+    [data-testid="stMarkdownContainer"] pre,
+    [data-testid="stMarkdownContainer"] code {{
+        background: {theme["surface_muted"]} !important;
+        color: {theme["text"]} !important;
+        border: 1px solid {theme["border"]};
+        border-radius: 8px;
+    }}
+
+    .chat-bubble pre:empty,
+    .chat-bubble code:empty,
+    [data-testid="stMarkdownContainer"] pre:empty,
+    [data-testid="stMarkdownContainer"] code:empty {{
+        display: none !important;
     }}
 
     .stButton > button,
@@ -1155,6 +1185,21 @@ def _fetch_customer_dashboard(customer_number: str) -> tuple[dict | None, str | 
         return None, f"내 계정 정보를 불러오는 중 오류가 발생했습니다: {error}"
 
 
+def _extract_explicit_customer_id(prompt: str) -> int | None:
+    patterns = [
+        r"고객\s*ID\s*(\d+)",
+        r"고객\s*번호\s*(\d+)",
+        r"테스트\s*고객번호\s*(\d+)",
+        r"고객[_\s-]*(\d+)",
+        r"customer[_\s-]*id\s*(\d+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, prompt or "", flags=re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    return None
+
+
 def _build_next_conversation(
     messages: list, latest_user_prompt: str, latest_ai_content: str
 ) -> list[tuple[str, str]]:
@@ -1222,18 +1267,30 @@ def _render_chat_message(role: str, content: str) -> None:
     bubble_class = "user" if role == "user" else "assistant"
     st.markdown(f'<div class="chat-label">{label}</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="chat-bubble {bubble_class}">', unsafe_allow_html=True)
-    st.markdown(content)
+    st.markdown(_sanitize_chat_markdown(content))
     st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _sanitize_chat_markdown(content: str) -> str:
+    text = str(content or "")
+    text = re.sub(r"```[\w+-]*\s*```", "", text, flags=re.MULTILINE)
+    text = re.sub(r"(?m)^\s*`{3,}\s*$\n^\s*`{3,}\s*$", "", text)
+    return text.strip()
 
 
 def _run_assistant(prompt: str) -> str:
     selected_customer = st.session_state.selected_customer
+    explicit_customer_id = _extract_explicit_customer_id(prompt)
+    target_customer = selected_customer
+    if explicit_customer_id is not None:
+        explicit_customer, _ = _fetch_customer_dashboard(str(explicit_customer_id))
+        target_customer = explicit_customer
     graph_prompt = prompt
 
-    if selected_customer:
-        customer_name = selected_customer.get("customer_name")
-        customer_id = selected_customer.get("customer_id")
-        customer_context = _build_customer_prompt_context(selected_customer)
+    if target_customer:
+        customer_name = target_customer.get("customer_name")
+        customer_id = target_customer.get("customer_id")
+        customer_context = _build_customer_prompt_context(target_customer)
         graph_prompt = (
             f"현재 로그인한 고객은 {customer_name}(테스트 고객번호 {customer_id})입니다.\n"
             f"고객 본인이 이해하기 쉬운 말투로, 이 고객의 가입 상품과 조건을 반영해서 답변해 주세요.\n"
@@ -1243,7 +1300,13 @@ def _run_assistant(prompt: str) -> str:
             f"사용자 질문: {prompt}"
         )
 
-    st.session_state.conversation_messages.append(("user", graph_prompt))
+    if explicit_customer_id is not None:
+        graph_messages = [("user", graph_prompt)]
+    else:
+        graph_messages = list(st.session_state.conversation_messages)
+        graph_messages.append(("user", graph_prompt))
+
+    st.session_state.conversation_messages = graph_messages
 
     with langfuse_trace_context(
         trace_name="streamlit-chat-turn",
@@ -1259,16 +1322,16 @@ def _run_assistant(prompt: str) -> str:
             as_type="span",
             input={
                 "prompt": graph_prompt,
-                "conversation_length": len(st.session_state.conversation_messages),
+                "conversation_length": len(graph_messages),
             },
             metadata={"surface": "streamlit"},
         ) as observation:
             result = st.session_state.graph.invoke(
                 {
-                    "messages": st.session_state.conversation_messages,
+                    "messages": graph_messages,
                     "next": "",
-                    "member_id": str(selected_customer.get("customer_id")) if selected_customer else None,
-                    "customer_id": selected_customer.get("customer_id") if selected_customer else None,
+                    "member_id": str(target_customer.get("customer_id")) if target_customer else None,
+                    "customer_id": target_customer.get("customer_id") if target_customer else explicit_customer_id,
                     "context": None,
                     "plan": [],
                     "current_step": 0,
