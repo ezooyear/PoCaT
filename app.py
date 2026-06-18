@@ -24,7 +24,7 @@ PDF_DIR = Path(__file__).resolve().parent / "data" / "pdfs"
 
 
 st.set_page_config(
-    page_title="KB 고객 상담 지원",
+    page_title="KB 내 금융상품 도우미",
     page_icon="KB",
     layout="wide",
 )
@@ -789,7 +789,7 @@ def _render_product_detail(account: dict) -> None:
         <div class="detail-card">
             <div class="detail-card-label">가입 가능 금액</div>
             <div class="detail-card-value">{amount_range}</div>
-            <div class="detail-card-note">고객 월 저축 가능액과 함께 확인</div>
+            <div class="detail-card-note">내 월 저축 가능액과 함께 확인</div>
         </div>
         <div class="detail-card">
             <div class="detail-card-label">가입 가능 기간</div>
@@ -799,7 +799,7 @@ def _render_product_detail(account: dict) -> None:
         <div class="detail-card">
             <div class="detail-card-label">금리 범위</div>
             <div class="detail-card-value">{rate_range}</div>
-            <div class="detail-card-note">고객 적용금리 {_format_rate(account.get("applied_rate"))}</div>
+            <div class="detail-card-note">내 적용금리 {_format_rate(account.get("applied_rate"))}</div>
         </div>
     </div>
     <div class="detail-grid">
@@ -811,7 +811,7 @@ def _render_product_detail(account: dict) -> None:
         <div class="detail-card">
             <div class="detail-card-label">계좌 상태</div>
             <div class="detail-card-value">{account.get("account_status", "-")}</div>
-            <div class="detail-card-note">만기·유지·추가 가입 상담 기준</div>
+            <div class="detail-card-note">만기·유지·추가 가입 확인 기준</div>
         </div>
         <div class="detail-card">
             <div class="detail-card-label">현재 잔액</div>
@@ -833,7 +833,7 @@ def _render_product_detail(account: dict) -> None:
             <div class="detail-card-value">{_format_money(account.get("monthly_amount") or account.get("deposit_amount"))}</div>
         </div>
         <div class="detail-status">
-            <div class="detail-card-label">상담 활용</div>
+            <div class="detail-card-label">다음 확인</div>
             <div class="detail-card-value">만기·우대·추가가입</div>
         </div>
     </div>
@@ -903,6 +903,46 @@ def _calculate_age(birth_date: object) -> int | None:
         return None
 
 
+def _format_age_band(birth_date: object) -> str:
+    age = _calculate_age(birth_date)
+    if age is None:
+        return "나이대 미확인"
+    if age < 10:
+        return "10대 미만"
+    return f"{age // 10 * 10}대"
+
+
+def _is_soldier_customer(customer: dict) -> bool:
+    job_text = str(customer.get("customer_job") or "").strip().lower()
+    soldier_markers = ("군인", "직업군인", "장병", "부사관", "장교", "군간부", "병사", "하사", "중사", "대위")
+    return any(marker in job_text for marker in soldier_markers)
+
+
+def _is_military_only_product(product: dict) -> bool:
+    product_text = " ".join(
+        str(product.get(key) or "")
+        for key in ("product_name", "rag_document_key")
+    ).lower()
+    military_markers = ("군인", "직업군인", "장병", "장기간부", "군간부", "나라사랑")
+    return any(marker in product_text for marker in military_markers)
+
+
+def _is_soldier_tomorrow_savings(product: dict) -> bool:
+    product_text = " ".join(
+        str(product.get(key) or "")
+        for key in ("product_name", "rag_document_key")
+    )
+    normalized = product_text.replace(" ", "")
+    markers = ("장병내일준비적금", "장병내일적금", "장병준비내일적금")
+    return any(marker in normalized for marker in markers)
+
+
+def _is_product_allowed_for_customer_job(customer: dict, product: dict) -> bool:
+    if _is_military_only_product(product) and not _is_soldier_customer(customer):
+        return False
+    return True
+
+
 def _fetch_top_recommendable_products(customer: dict, limit: int = 3) -> list[dict]:
     monthly_saving = customer.get("available_monthly_saving")
     customer_age = _calculate_age(customer.get("birth_date"))
@@ -947,6 +987,12 @@ def _fetch_top_recommendable_products(customer: dict, limit: int = 3) -> list[di
         if product.get("product_id") in owned_product_ids:
             continue
 
+        if not _is_product_allowed_for_customer_job(customer, product):
+            continue
+
+        if customer_age is not None and _is_soldier_tomorrow_savings(product) and customer_age >= 30:
+            continue
+
         min_amount = product.get("min_amount")
         max_amount = product.get("max_amount")
         if monthly_saving is not None:
@@ -975,15 +1021,16 @@ def _fetch_top_recommendable_products(customer: dict, limit: int = 3) -> list[di
 
 
 def _render_top_recommendations(customer: dict | None) -> None:
-    st.markdown('<div class="section-title">추천 가능 상품 TOP 3</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">내 조건에 맞는 상품 후보 TOP 3</div>', unsafe_allow_html=True)
+    st.caption("이 영역은 내 기본 조건을 빠르게 대조한 후보입니다. 최종 추천 판단은 AI 상담에서 가입 가능 여부와 우대조건을 함께 확인하세요.")
 
     if not customer:
-        st.info("고객번호를 조회하면 추천 가능 상품 TOP 3가 표시됩니다.")
+        st.info("내 계정을 불러오면 조건 충족 상품 후보 TOP 3가 표시됩니다.")
         return
 
     products = _fetch_top_recommendable_products(customer)
     if not products:
-        st.info("현재 조건으로 추천 가능한 상품을 찾지 못했습니다.")
+        st.info("현재 조건으로 후보 상품을 찾지 못했습니다.")
         return
 
     for rank, product in enumerate(products, 1):
@@ -1000,7 +1047,7 @@ def _render_top_recommendations(customer: dict | None) -> None:
         기간 {_format_period_range(product.get("min_period_months"), product.get("max_period_months"))}
     </div>
     <div class="recommend-reason">
-        월 저축 가능액 기준 가입금액 조건을 충족하는 상품입니다. 상담 시 우대조건 충족 여부를 함께 확인하세요.
+        내 월 저축 가능액과 연령 기준을 통과한 후보 상품입니다. 가입 전 우대조건과 세부 가입 가능 여부를 AI 상담에서 확인하세요.
     </div>
 </div>
 """,
@@ -1008,7 +1055,7 @@ def _render_top_recommendations(customer: dict | None) -> None:
         )
         if pdf_path:
             st.download_button(
-                f"{rank}위 상품 약관 PDF 다운로드",
+                f"{rank}위 후보 약관 PDF 다운로드",
                 data=pdf_path.read_bytes(),
                 file_name=pdf_path.name,
                 mime="application/pdf",
@@ -1017,16 +1064,16 @@ def _render_top_recommendations(customer: dict | None) -> None:
                 key=f"recommend_pdf_{product.get('product_id', rank)}",
             )
         else:
-            st.caption(f"{product.get('product_name', '추천 상품')}의 연결된 약관 PDF를 찾지 못했습니다.")
+            st.caption(f"{product.get('product_name', '후보 상품')}의 연결된 약관 PDF를 찾지 못했습니다.")
 
 
 def _fetch_customer_dashboard(customer_number: str) -> tuple[dict | None, str | None]:
     normalized = customer_number.strip()
     if not normalized:
-        return None, "고객번호를 입력해 주세요."
+        return None, "테스트 고객번호를 입력해 주세요."
 
     if not normalized.isdigit():
-        return None, "고객번호는 숫자로 입력해 주세요."
+        return None, "테스트 고객번호는 숫자로 입력해 주세요."
 
     customer_id = int(normalized)
 
@@ -1059,7 +1106,7 @@ def _fetch_customer_dashboard(customer_number: str) -> tuple[dict | None, str | 
         if customer_row is None:
             cursor.close()
             conn.close()
-            return None, f"고객번호 {customer_id}번 고객을 찾을 수 없습니다."
+            return None, f"테스트 고객번호 {customer_id}번 계정을 찾을 수 없습니다."
 
         customer_columns = [desc[0] for desc in cursor.description]
         customer = dict(zip(customer_columns, customer_row))
@@ -1105,7 +1152,7 @@ def _fetch_customer_dashboard(customer_number: str) -> tuple[dict | None, str | 
         customer["accounts"] = accounts
         return customer, None
     except Exception as error:
-        return None, f"고객 정보를 조회하는 중 오류가 발생했습니다: {error}"
+        return None, f"내 계정 정보를 불러오는 중 오류가 발생했습니다: {error}"
 
 
 def _build_next_conversation(
@@ -1124,8 +1171,54 @@ def _build_next_conversation(
     return preserved
 
 
+def _format_yn(value: object) -> str:
+    return "충족" if bool(value) else "미충족"
+
+
+def _build_customer_prompt_context(customer: dict) -> str:
+    accounts = customer.get("accounts") or []
+    active_accounts = [
+        account
+        for account in accounts
+        if str(account.get("account_status", "")).upper() == "ACTIVE"
+    ]
+    account_lines = []
+    for account in active_accounts[:5]:
+        account_lines.append(
+            "- "
+            f"{account.get('product_name', '상품명 미확인')} "
+            f"({account.get('product_type', '-')}, 적용금리 {_format_rate(account.get('applied_rate'))}, "
+            f"만기 {_format_date(account.get('maturity_date'))}, 잔액 {_format_money(account.get('current_balance'))})"
+        )
+
+    if not account_lines:
+        account_lines.append("- 현재 활성 가입 상품 없음")
+
+    return "\n".join(
+        [
+            "[내 계정 요약]",
+            f"- 이름: {customer.get('customer_name', '-')}",
+            f"- 나이대: {_format_age_band(customer.get('birth_date'))}",
+            f"- 직업: {customer.get('customer_job', '-')}",
+            f"- 소득수준: {customer.get('income_level', '-')}",
+            f"- 거래 개월: {customer.get('transaction_months') or 0}개월",
+            f"- 월 저축 가능액: {_format_money(customer.get('available_monthly_saving'))}",
+            "",
+            "[현재 확인 가능한 우대조건 상태]",
+            f"- 주거래은행: {_format_yn(customer.get('main_bank_yn'))}",
+            f"- 급여이체: {_format_yn(customer.get('salary_transfer_yn'))}",
+            f"- 자동이체: {_format_yn(customer.get('auto_transfer_yn'))}",
+            f"- 카드사용: {_format_yn(customer.get('card_usage_yn'))}",
+            f"- 마케팅동의: {_format_yn(customer.get('marketing_agree_yn'))}",
+            "",
+            "[가입 중인 상품]",
+            *account_lines,
+        ]
+    )
+
+
 def _render_chat_message(role: str, content: str) -> None:
-    label = "상담원" if role == "user" else "상담 어시스턴트"
+    label = "나" if role == "user" else "AI 금융 도우미"
     bubble_class = "user" if role == "user" else "assistant"
     st.markdown(f'<div class="chat-label">{label}</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="chat-bubble {bubble_class}">', unsafe_allow_html=True)
@@ -1140,9 +1233,13 @@ def _run_assistant(prompt: str) -> str:
     if selected_customer:
         customer_name = selected_customer.get("customer_name")
         customer_id = selected_customer.get("customer_id")
+        customer_context = _build_customer_prompt_context(selected_customer)
         graph_prompt = (
-            f"현재 조회된 고객은 {customer_name}(고객번호 {customer_id})입니다.\n"
-            f"고객 맥락을 반영해서 답변해 주세요.\n\n"
+            f"현재 로그인한 고객은 {customer_name}(테스트 고객번호 {customer_id})입니다.\n"
+            f"고객 본인이 이해하기 쉬운 말투로, 이 고객의 가입 상품과 조건을 반영해서 답변해 주세요.\n"
+            f"특히 우대금리 질문에는 아래 우대조건 상태를 근거로 '충족/미충족/추가 확인 필요'를 구분해 답변하세요.\n"
+            f"정확한 상품별 우대금리 세부 항목을 모르면 모른다고만 끝내지 말고, 현재 확인 가능한 조건과 다음 확인 항목을 안내하세요.\n\n"
+            f"{customer_context}\n\n"
             f"사용자 질문: {prompt}"
         )
 
@@ -1195,10 +1292,23 @@ def _run_assistant(prompt: str) -> str:
     return ai_content
 
 
-def _handle_prompt(prompt: str) -> None:
-    st.session_state.messages.append({"role": "user", "content": prompt})
+def _render_chat_loading() -> None:
+    st.markdown('<div class="chat-label">AI 금융 도우미</div>', unsafe_allow_html=True)
+    st.markdown('<div class="chat-bubble assistant">답변을 생성하고 있습니다...</div>', unsafe_allow_html=True)
 
-    with st.spinner("고객 상황에 맞는 답변을 준비하고 있습니다."):
+
+def _handle_prompt(prompt: str, chat_container=None) -> None:
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    assistant_slot = None
+
+    if chat_container is not None:
+        with chat_container:
+            _render_chat_message("user", prompt)
+            assistant_slot = st.empty()
+            with assistant_slot.container():
+                _render_chat_loading()
+
+    with st.spinner("내 상황에 맞는 답변을 준비하고 있습니다."):
         try:
             ai_content = _run_assistant(prompt)
             st.session_state.messages.append({"role": "assistant", "content": ai_content})
@@ -1207,10 +1317,18 @@ def _handle_prompt(prompt: str) -> None:
                 prompt,
                 ai_content,
             )
+            if assistant_slot is not None:
+                assistant_slot.empty()
+                with assistant_slot.container():
+                    _render_chat_message("assistant", ai_content)
         except Exception as error:
             error_msg = f"답변을 생성하는 중 오류가 발생했습니다: {error}"
             st.error(error_msg)
             st.session_state.messages.append({"role": "assistant", "content": error_msg})
+            if assistant_slot is not None:
+                assistant_slot.empty()
+                with assistant_slot.container():
+                    _render_chat_message("assistant", error_msg)
             flush_langfuse()
 
 
@@ -1226,23 +1344,23 @@ with toolbar_right:
 st.markdown(
     """
 <div class="hero">
-    <div class="hero-label">KB 고객 상담 지원</div>
-    <h1>고객 상담 지원 대시보드</h1>
-    <p>고객 정보와 가입 상품을 확인하고, 상담에 필요한 내용을 빠르게 정리합니다.</p>
+    <div class="hero-label">KB 내 금융상품 도우미</div>
+    <h1>내 상품과 가입 조건을 한눈에</h1>
+    <p>내가 가입한 상품을 확인하고, 궁금한 점은 AI 금융 도우미에게 바로 물어보세요.</p>
 </div>
 """,
     unsafe_allow_html=True,
 )
 
-dashboard_col, chat_col = st.columns([0.62, 0.38], gap="large")
+overview_page, chat_page = st.tabs(["1. 내 상품", "2. AI 상담"])
 
-with dashboard_col:
-    st.markdown('<div class="section-title">고객 패널</div>', unsafe_allow_html=True)
+with overview_page:
+    st.markdown('<div class="section-title">내 금융상품</div>', unsafe_allow_html=True)
     st.markdown(
         """
 <div class="insight-band">
-    <strong>고객 정보와 가입 상품을 확인하는 영역입니다.</strong>
-    <p>고객번호를 조회하면 고객 프로필, 가입상품, 선택 상품 상세를 한 화면에서 확인할 수 있습니다.</p>
+    <strong>내 가입 상품과 조건에 맞는 상품 후보를 확인하는 페이지입니다.</strong>
+    <p>테스트 계정을 불러오면 내 프로필, 가입 상품, 선택 상품 상세, 조건 충족 상품 후보 TOP 3를 함께 확인할 수 있습니다.</p>
 </div>
 """,
         unsafe_allow_html=True,
@@ -1252,12 +1370,12 @@ with dashboard_col:
         lookup_col, button_col = st.columns([0.76, 0.24])
         with lookup_col:
             customer_number = st.text_input(
-                "고객번호",
-                placeholder="예: 1",
+                "테스트 고객번호",
+                placeholder="테스트 고객번호 예: 1",
                 label_visibility="collapsed",
             )
         with button_col:
-            lookup_submitted = st.form_submit_button("조회")
+            lookup_submitted = st.form_submit_button("내 계정 불러오기")
 
     if lookup_submitted:
         customer, error = _fetch_customer_dashboard(customer_number)
@@ -1278,13 +1396,14 @@ with dashboard_col:
         st.markdown(
             """
 <div class="empty-dashboard">
-    고객번호를 조회하면 이 영역에 고객 프로필, 거래 조건, 가입 상품 현황이 표시됩니다.
-    상담원 패널은 조회된 고객 맥락을 바탕으로 상담을 지원합니다.
+    테스트 고객번호를 입력하면 내 프로필, 거래 조건, 가입 상품 현황이 표시됩니다.
+    조건 충족 상품 후보와 AI 상담은 불러온 내 계정 정보를 바탕으로 동작합니다.
 </div>
 """,
             unsafe_allow_html=True,
         )
     else:
+        customer_col, recommend_col = st.columns([0.62, 0.38], gap="large")
         accounts = customer.get("accounts") or []
         active_accounts = [
             account
@@ -1294,13 +1413,14 @@ with dashboard_col:
         total_balance = sum(int(account.get("current_balance") or 0) for account in active_accounts)
         monthly_total = sum(int(account.get("monthly_amount") or 0) for account in active_accounts)
 
-        st.markdown(
-            f"""
+        with customer_col:
+            st.markdown(
+                f"""
 <div class="panel">
-    <span class="status-pill">조회 완료</span>
+    <span class="status-pill">계정 연결 완료</span>
     <div class="profile-name">{customer.get("customer_name", "-")}</div>
     <div class="profile-meta">
-        고객번호 {customer.get("customer_id", "-")} · {customer.get("customer_job", "-")} ·
+        {_format_age_band(customer.get("birth_date"))} · {customer.get("customer_job", "-")} ·
         소득수준 {customer.get("income_level", "-")}
     </div>
     <div class="metric-row">
@@ -1319,22 +1439,34 @@ with dashboard_col:
     </div>
 </div>
 """,
-            unsafe_allow_html=True,
-        )
+                unsafe_allow_html=True,
+            )
 
-        condition_col_1, condition_col_2, condition_col_3 = st.columns(3)
-        condition_col_1.metric("거래 개월", f"{customer.get('transaction_months') or 0}개월")
-        condition_col_2.metric("연소득", f"{customer.get('annual_income') or 0:,}만원")
-        condition_col_3.metric("월 저축 가능액", _format_money(customer.get("available_monthly_saving")))
+            condition_col_1, condition_col_2, condition_col_3 = st.columns(3)
+            condition_col_1.metric("거래 개월", f"{customer.get('transaction_months') or 0}개월")
+            condition_col_2.metric("연소득", f"{customer.get('annual_income') or 0:,}만원")
+            condition_col_3.metric("월 저축 가능액", _format_money(customer.get("available_monthly_saving")))
 
-        st.markdown('<div class="section-title">가입 상품 현황</div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-title">내 우대조건 상태</div>', unsafe_allow_html=True)
+            bonus_cols = st.columns(5)
+            bonus_statuses = [
+                ("주거래", customer.get("main_bank_yn")),
+                ("급여이체", customer.get("salary_transfer_yn")),
+                ("자동이체", customer.get("auto_transfer_yn")),
+                ("카드사용", customer.get("card_usage_yn")),
+                ("마케팅동의", customer.get("marketing_agree_yn")),
+            ]
+            for bonus_col, (label, value) in zip(bonus_cols, bonus_statuses):
+                bonus_col.metric(label, _format_yn(value))
 
-        if not accounts:
-            st.info("현재 조회된 가입 상품이 없습니다.")
-        else:
-            st.caption("상품명을 클릭하면 상품 요약과 약관 PDF 다운로드가 표시됩니다.")
-            st.markdown(
-                """
+            st.markdown('<div class="section-title">가입 상품 현황</div>', unsafe_allow_html=True)
+
+            if not accounts:
+                st.info("현재 가입 중인 상품이 없습니다.")
+            else:
+                st.caption("상품명을 클릭하면 상품 요약과 약관 PDF 다운로드가 표시됩니다.")
+                st.markdown(
+                    """
 <div class="account-table-header">
     <div style="display:grid; grid-template-columns: 2.1fr 0.7fr 0.85fr 1fr 1fr 0.9fr 1fr; gap:0.7rem; align-items:center;">
         <div>상품명</div>
@@ -1347,82 +1479,100 @@ with dashboard_col:
     </div>
 </div>
 """,
-                unsafe_allow_html=True,
-            )
+                    unsafe_allow_html=True,
+                )
 
-            for index, account in enumerate(accounts):
-                with st.container(border=True):
-                    row_cols = st.columns([2.1, 0.7, 0.85, 1, 1, 0.9, 1])
-                    with row_cols[0]:
-                        if st.button(
-                            account.get("product_name", "상품명 미확인"),
-                            key=f"account_detail_{account.get('account_id', index)}",
-                            use_container_width=True,
-                        ):
-                            st.session_state.selected_account_index = index
-                    row_cols[1].markdown(f"**{account.get('product_type', '-')}**")
-                    row_cols[2].markdown(f"**{account.get('account_status', '-')}**")
-                    row_cols[3].markdown(_format_date(account.get("join_date")))
-                    row_cols[4].markdown(_format_date(account.get("maturity_date")))
-                    row_cols[5].markdown(_format_rate(account.get("applied_rate")))
-                    row_cols[6].markdown(_format_money(account.get("current_balance")))
+                for index, account in enumerate(accounts):
+                    with st.container(border=True):
+                        row_cols = st.columns([2.1, 0.7, 0.85, 1, 1, 0.9, 1])
+                        with row_cols[0]:
+                            if st.button(
+                                account.get("product_name", "상품명 미확인"),
+                                key=f"account_detail_{account.get('account_id', index)}",
+                                use_container_width=True,
+                            ):
+                                st.session_state.selected_account_index = index
+                        row_cols[1].markdown(f"**{account.get('product_type', '-')}**")
+                        row_cols[2].markdown(f"**{account.get('account_status', '-')}**")
+                        row_cols[3].markdown(_format_date(account.get("join_date")))
+                        row_cols[4].markdown(_format_date(account.get("maturity_date")))
+                        row_cols[5].markdown(_format_rate(account.get("applied_rate")))
+                        row_cols[6].markdown(_format_money(account.get("current_balance")))
 
-            selected_index = st.session_state.selected_account_index
-            if selected_index is not None and 0 <= selected_index < len(accounts):
-                selected_account = accounts[selected_index]
-                _render_product_detail(selected_account)
+                selected_index = st.session_state.selected_account_index
+                if selected_index is not None and 0 <= selected_index < len(accounts):
+                    selected_account = accounts[selected_index]
+                    _render_product_detail(selected_account)
 
-        st.markdown('<div class="section-title">상담 포인트</div>', unsafe_allow_html=True)
-        st.markdown(
-            """
+        with recommend_col:
+            _render_top_recommendations(customer)
+
+            st.markdown('<div class="section-title">내가 확인할 항목</div>', unsafe_allow_html=True)
+            st.markdown(
+                """
 <div class="panel">
     <div class="journey-step">
         <div class="step-number">1</div>
         <div class="step-copy">
-            <strong>기존 상품 점검</strong>
-            <span>만기, 금리, 납입액을 보고 유지 또는 추가 가입 상담을 시작합니다.</span>
+            <strong>가입 상품 점검</strong>
+            <span>만기, 금리, 납입액을 보고 유지할지 추가 가입을 알아볼지 확인합니다.</span>
         </div>
     </div>
     <div class="journey-step">
         <div class="step-number">2</div>
         <div class="step-copy">
             <strong>우대조건 확인</strong>
-            <span>급여이체, 자동이체, 카드사용 등 충족 가능한 조건을 확인합니다.</span>
+            <span>급여이체, 자동이체, 카드사용 등 내가 충족할 수 있는 조건을 확인합니다.</span>
         </div>
     </div>
     <div class="journey-step">
         <div class="step-number">3</div>
         <div class="step-copy">
-            <strong>다음 행동 제안</strong>
-            <span>고객 상황에 맞는 추가 납입, 만기 관리, 추천 상품을 상담합니다.</span>
+            <strong>다음 행동 확인</strong>
+            <span>내 상황에 맞는 추가 납입, 만기 관리, 상품 후보를 AI 상담에서 확인합니다.</span>
         </div>
     </div>
 </div>
 """,
-            unsafe_allow_html=True,
-        )
+                unsafe_allow_html=True,
+            )
 
-with chat_col:
+with chat_page:
     selected_name = (
         st.session_state.selected_customer.get("customer_name")
         if st.session_state.selected_customer
-        else "고객 미조회"
+        else "계정 미연결"
     )
-    st.markdown(f'<div class="section-title">상담원 패널 · {selected_name}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-title">AI 금융 상담 · {selected_name}</div>', unsafe_allow_html=True)
     st.markdown(
         """
 <div class="insight-band">
-    <strong>상담원이 고객에게 전달할 내용을 정리하는 영역입니다.</strong>
-    <p>고객번호를 먼저 조회하면 상담 어시스턴트가 해당 고객 맥락을 반영해 답변합니다.</p>
+    <strong>내 상품과 가입 조건에 대해 궁금한 점을 물어보는 공간입니다.</strong>
+    <p>1페이지에서 내 계정을 불러오면 AI 금융 도우미가 내 가입 상품과 조건을 반영해 답변합니다.</p>
 </div>
 """,
         unsafe_allow_html=True,
     )
 
-    _render_top_recommendations(st.session_state.selected_customer)
+    if st.session_state.selected_customer:
+        customer = st.session_state.selected_customer
+        accounts = customer.get("accounts") or []
+        active_accounts = [
+            account
+            for account in accounts
+            if str(account.get("account_status", "")).upper() == "ACTIVE"
+        ]
+        total_balance = sum(int(account.get("current_balance") or 0) for account in active_accounts)
+        summary_col_1, summary_col_2, summary_col_3, summary_col_4 = st.columns(4)
+        summary_col_1.metric("내 계정", customer.get("customer_id", "-"))
+        summary_col_2.metric("가입 상품", f"{len(accounts)}개")
+        summary_col_3.metric("활성 잔액", _format_money(total_balance))
+        summary_col_4.metric("월 저축 가능액", _format_money(customer.get("available_monthly_saving")))
+    else:
+        st.info("내 계정 정보가 필요한 질문은 1페이지에서 테스트 계정을 먼저 불러온 뒤 사용할 수 있습니다.")
 
-    st.markdown('<div class="chat-scroll-hint">상담 내역은 이 영역 안에서 스크롤됩니다.</div>', unsafe_allow_html=True)
-    chat_history = st.container(height=460, border=True)
+    st.markdown('<div class="chat-scroll-hint">대화 내역은 이 영역 안에서 스크롤됩니다.</div>', unsafe_allow_html=True)
+    chat_history = st.container(height=620, border=True)
 
     prompt = None
 
@@ -1431,7 +1581,7 @@ with chat_col:
         with input_col:
             typed_prompt = st.text_input(
                 "질문",
-                placeholder="예: 이 고객에게 설명할 만기 안내 문장을 만들어줘",
+                placeholder="예: 내가 받을 수 있는 우대금리 조건을 알려줘",
                 label_visibility="collapsed",
             )
         with submit_col:
@@ -1442,12 +1592,12 @@ with chat_col:
         if not prompt:
             st.warning("질문을 입력해 주세요.")
 
-    st.caption("상담원 추천 질문")
+    st.caption("추천 질문")
     suggested_prompts = [
-        ("가입상품 요약", "상담원이 고객에게 설명할 수 있게 이 고객의 가입 상품 현황과 핵심 상담 포인트를 요약해줘."),
-        ("추가 추천", "이 고객의 기존 가입 상품과 월 저축 가능액을 고려해서 상담원이 제안할 추가 적금 후보를 정리해줘."),
-        ("만기 관리", "이 고객의 만기 예정 상품을 확인하고 상담원이 안내할 만기 전 체크포인트를 정리해줘."),
-        ("우대조건 확인", "이 고객이 받을 수 있는 우대금리 조건을 기존 거래 조건 중심으로 점검하고 상담 멘트로 정리해줘."),
+        ("내 상품 요약", "내가 가입한 상품 현황과 꼭 확인해야 할 내용을 쉽게 요약해줘."),
+        ("나에게 맞는 상품", "내 가입 상품, 월 저축 가능액, 가입 가능 조건을 종합해서 나에게 추천할 만한 예적금 상품을 순위와 이유, 주의사항까지 알려줘."),
+        ("만기 전에 할 일", "내 만기 예정 상품이 있다면 만기 전에 확인해야 할 체크포인트를 알려줘."),
+        ("우대조건 확인", "내 계정의 주거래은행, 급여이체, 자동이체, 카드사용, 마케팅동의 상태를 기준으로 현재 충족한 우대조건과 추가로 확인해야 할 조건을 나눠서 알려줘."),
     ]
     suggestion_cols = st.columns(2)
     for index, (label, suggested_prompt) in enumerate(suggested_prompts):
@@ -1456,14 +1606,14 @@ with chat_col:
                 if st.session_state.selected_customer:
                     prompt = suggested_prompt
                 else:
-                    st.warning("추천 질문은 고객번호를 먼저 조회한 뒤 사용할 수 있습니다.")
-
-    if prompt:
-        _handle_prompt(prompt)
+                    st.warning("추천 질문은 내 계정을 먼저 불러온 뒤 사용할 수 있습니다.")
 
     with chat_history:
-        if not st.session_state.messages:
-            st.info("상담 내역이 없습니다. 고객을 조회한 뒤 상담 질문을 입력해 주세요.")
+        if not st.session_state.messages and not prompt:
+            st.info("대화 내역이 없습니다. 내 계정을 불러온 뒤 궁금한 점을 입력해 주세요.")
 
         for msg in st.session_state.messages:
             _render_chat_message(msg["role"], msg["content"])
+
+    if prompt:
+        _handle_prompt(prompt, chat_history)
