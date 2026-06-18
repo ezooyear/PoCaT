@@ -16,10 +16,11 @@ Validation Agent
 
 import json
 from typing import Any
-
+import re
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from config.settings import get_llm
+from graph import state
 from graph.state import AgentState
 from agents.base import make_agent_result
 from agents.validation.prompts import VALIDATION_SYSTEM_PROMPT
@@ -79,6 +80,7 @@ def validation_agent_node(state: AgentState) -> dict[str, Any]:
         )
 
     is_valid = bool(verify_result.get("is_valid"))
+    validation_summary = _extract_validation_summary(verify_result, state)
 
     validation_result = make_agent_result(
         status="success" if is_valid else "failed",
@@ -86,7 +88,14 @@ def validation_agent_node(state: AgentState) -> dict[str, Any]:
             "verify_result": verify_result,
             "is_valid": is_valid,
             "issues": verify_result.get("issues", []),
-            "revision_required": verify_result.get("revision_required", not is_valid),
+            "revision_required": validation_summary["revision_required"],
+
+            # 추가: Supervisor final이 바로 읽을 수 있는 구조화 필드
+            "failure_type": validation_summary["failure_type"],
+            "missing_fields": validation_summary["missing_fields"],
+            "blocking_issues": validation_summary["blocking_issues"],
+            "awaiting_user_input": validation_summary["awaiting_user_input"],
+
             "checked_items": verify_result.get("checked_items", rule_checked_items),
             "summary": verify_result.get("summary"),
             "final_notes": verify_result.get("final_notes", []),
@@ -104,12 +113,114 @@ def validation_agent_node(state: AgentState) -> dict[str, Any]:
 
     return {
         "validation_result": validation_result,
+
+        # 추가: Supervisor가 깊게 파싱하지 않고 바로 볼 수 있는 필드
+        "validation_passed": is_valid,
+        "revision_required": validation_summary["revision_required"],
+        "failure_type": validation_summary["failure_type"],
+        "missing_fields": validation_summary["missing_fields"],
+        "blocking_issues": validation_summary["blocking_issues"],
+        "awaiting_user_input": validation_summary["awaiting_user_input"],
+
         "agent_outputs": agent_outputs,
         "current_agent": "validation_agent",
         "completed_agents": completed_agents,
         "current_step": (state.get("current_step") or 0) + 1,
     }
 
+def _extract_validation_summary(
+    verify_result: dict[str, Any],
+    state: AgentState,
+) -> dict[str, Any]:
+    """
+    Validation 결과를 Supervisor final이 바로 읽을 수 있는 형태로 요약합니다.
+    - missing_fields: 사용자가 추가로 알려줘야 하는 정보
+    - blocking_issues: 확정 추천을 막아야 하는 검증 이슈
+    - failure_type: missing_user_input / agent_output_error / passed
+    """
+    is_valid = bool(verify_result.get("is_valid"))
+    revision_required = bool(verify_result.get("revision_required", not is_valid))
+
+    issues = verify_result.get("issues") or []
+    missing_fields = _infer_missing_user_fields(state)
+    blocking_issues: list[str] = []
+
+    for issue in issues:
+        if isinstance(issue, dict):
+            level = str(issue.get("level") or "").lower()
+            message = str(issue.get("message") or "").strip()
+            suggestion = str(issue.get("suggestion") or "").strip()
+
+            if level in ["error", "warning"]:
+                if message:
+                    blocking_issues.append(message)
+                elif suggestion:
+                    blocking_issues.append(suggestion)
+        else:
+            message = str(issue).strip()
+            if message:
+                blocking_issues.append(message)
+
+    # 검증 실패인데 구체 이슈가 비어 있으면 summary라도 넣어둡니다.
+    if not is_valid and not blocking_issues and not missing_fields:
+        summary = str(verify_result.get("summary") or "").strip()
+        blocking_issues.append(summary or "검증 이슈가 발견되었습니다.")
+
+    if is_valid:
+        failure_type = "passed"
+    elif missing_fields:
+        failure_type = "missing_user_input"
+    else:
+        failure_type = "agent_output_error"
+
+    return {
+        "revision_required": revision_required,
+        "failure_type": failure_type,
+        "missing_fields": missing_fields,
+        "blocking_issues": blocking_issues,
+        "awaiting_user_input": bool(missing_fields),
+    }
+
+
+def _infer_missing_user_fields(state: AgentState) -> list[str]:
+    """
+    사용자 질문에서 추천에 필요한 최소 입력값이 빠졌는지 가볍게 확인합니다.
+    복잡한 판단은 하지 않고, Supervisor가 물어볼 항목만 정리합니다.
+    """
+    task_type = state.get("task_type")
+    if task_type != "recommendation":
+        return []
+
+    user_query = str(state.get("user_query") or "").replace(" ", "")
+    missing_fields: list[str] = []
+
+    has_customer_id = bool(state.get("customer_id")) or bool(
+        re.search(r"(고객|customer|id|ID|고객ID|고객id|고객_)?\d+번?", user_query)
+    )
+
+    has_monthly_amount = bool(
+        re.search(r"월?\d+만?원|\d{1,3}(,\d{3})*원", user_query)
+    )
+
+    has_period = bool(
+        re.search(r"\d+개월|\d+년|[0-9]+개월|[0-9]+년", user_query)
+    )
+
+    has_product_type = "적금" in user_query or "예금" in user_query
+
+    if not has_customer_id:
+        missing_fields.append("고객 ID")
+
+    if not has_monthly_amount:
+        missing_fields.append("월 납입 예정 금액")
+
+    if not has_period:
+        missing_fields.append("희망 가입 기간")
+
+    if not has_product_type:
+        missing_fields.append("상품 유형(예금/적금)")
+
+    return missing_fields
 
 def _should_run_llm_validation(state: AgentState) -> bool:
     """
