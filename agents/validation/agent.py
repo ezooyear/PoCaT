@@ -22,13 +22,14 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from config.settings import get_llm
 from graph import state
 from graph.state import AgentState
-from agents.base import make_agent_result
+from agents.base import build_agent_trace_input, build_agent_trace_output, make_agent_result
 from agents.validation.prompts import VALIDATION_SYSTEM_PROMPT
 from agents.validation.tools import (
     build_validation_context,
     build_rule_based_verify_result,
     run_validation_checks,
 )
+from observability.langfuse import flush_langfuse, langfuse_observation, update_observation
 
 
 # LLM 검증이 필요한 복잡한 작업만 지정합니다.
@@ -424,3 +425,46 @@ def _normalize_verify_result(data: dict[str, Any]) -> dict[str, Any]:
         "final_notes": data.get("final_notes") or [],
         "revision_required": bool(revision_required),
     }
+
+
+_validation_agent_node_impl = validation_agent_node
+
+
+def validation_agent_node(state: AgentState) -> dict[str, Any]:
+    try:
+        with langfuse_observation(
+            name="validation_agent",
+            as_type="span",
+            input=build_agent_trace_input(
+                state,
+                agent_name="validation_agent",
+                result_key="validation_result",
+            ),
+            metadata={"agent": "validation_agent"},
+        ) as observation:
+            result = _validation_agent_node_impl(state)
+            validation_result = result.get("validation_result", {})
+            update_observation(
+                observation,
+                output=build_agent_trace_output(
+                    validation_result,
+                    agent_name="validation_agent",
+                    state=state,
+                    result_key="validation_result",
+                    extra_output={
+                        "validation_passed": result.get("validation_passed"),
+                        "revision_required": result.get("revision_required"),
+                        "failure_type": result.get("failure_type"),
+                        "missing_fields": result.get("missing_fields"),
+                        "blocking_issues": result.get("blocking_issues"),
+                    },
+                ),
+                metadata={
+                    "agent": "validation_agent",
+                    "status": validation_result.get("status") if isinstance(validation_result, dict) else None,
+                    "failure_type": result.get("failure_type"),
+                },
+            )
+            return result
+    finally:
+        flush_langfuse()

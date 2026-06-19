@@ -8,9 +8,16 @@ from typing import Any
 from langchain_core.messages import AIMessage
 
 from graph.state import AgentState
-from agents.base import make_agent_result, run_agent_loop
+from agents.base import (
+    build_agent_trace_input,
+    build_agent_trace_output,
+    make_agent_result,
+    run_agent_loop,
+)
 from agents.customer.prompts import CUSTOMER_SYSTEM_PROMPT
 from agents.customer.tools import CUSTOMER_TOOLS
+from agents.eligibility.tools import parse_customer_profile
+from observability.langfuse import flush_langfuse, langfuse_observation, update_observation
 
 
 def _extract_customer_id(state: AgentState) -> int | None:
@@ -92,45 +99,106 @@ def customer_agent_node(state: AgentState) -> dict:
     """
     customer_id = _extract_customer_id(state)
     if customer_id is not None:
-        customer_name = _customer_name_from_id(customer_id)
-        tool_results, tool_errors = _run_required_customer_lookups(customer_name)
-        summary = _build_lookup_summary(customer_name, tool_results)
-        status = "failed" if tool_errors else "success"
-        error = "\n".join(tool_errors) if tool_errors else None
+        try:
+            with langfuse_observation(
+                name="customer_agent",
+                as_type="span",
+                input=build_agent_trace_input(
+                    state,
+                    agent_name="customer_agent",
+                    result_key="customer_result",
+                ),
+                metadata={"agent": "customer_agent"},
+            ) as observation:
+                customer_name = _customer_name_from_id(customer_id)
 
-        structured_result = make_agent_result(
-            status=status,
-            result={
-                "summary": summary,
-                "tool_results": tool_results,
-            },
-            evidence=tool_results,
-            error=error,
-        )
+                with langfuse_observation(
+                    name="customer_agent.prepare_inputs",
+                    as_type="span",
+                    input={"customer_id": customer_id},
+                    metadata={"agent": "customer_agent", "step": "prepare_inputs"},
+                ) as step_observation:
+                    update_observation(
+                        step_observation,
+                        output={"customer_name": customer_name},
+                        metadata={"agent": "customer_agent"},
+                    )
 
-        outputs = dict(state.get("agent_outputs") or {})
-        outputs["customer_agent"] = structured_result
+                with langfuse_observation(
+                    name="customer_agent.evaluate",
+                    as_type="span",
+                    input={"customer_name": customer_name, "tool_count": len(CUSTOMER_TOOLS)},
+                    metadata={"agent": "customer_agent", "step": "evaluate"},
+                ) as evaluation_observation:
+                    tool_results, tool_errors = _run_required_customer_lookups(customer_name)
+                    summary = _build_lookup_summary(customer_name, tool_results)
+                    customer_profile = _extract_customer_profile(tool_results)
+                    update_observation(
+                        evaluation_observation,
+                        output={
+                            "tool_names": [item.get("tool_name") for item in tool_results],
+                            "customer_profile": customer_profile,
+                            "summary_preview": summary[:500],
+                        },
+                        metadata={"agent": "customer_agent"},
+                    )
 
-        completed_agents = list(state.get("completed_agents") or [])
-        if "customer_agent" not in completed_agents:
-            completed_agents.append("customer_agent")
+                status = "failed" if tool_errors else "success"
+                error = "\n".join(tool_errors) if tool_errors else None
 
-        response = AIMessage(content=summary)
-        return_data = {
-            "messages": [response],
-            "agent_outputs": outputs,
-            "current_step": (state.get("current_step") or 0) + 1,
-            "current_agent": "customer_agent",
-            "completed_agents": completed_agents,
-            "customer_result": structured_result,
-        }
+                structured_result = make_agent_result(
+                    status=status,
+                    result={
+                        "summary": summary,
+                        "tool_results": tool_results,
+                        "customer_profile": customer_profile,
+                    },
+                    evidence=tool_results,
+                    error=error,
+                )
 
-        if tool_errors:
-            errors = list(state.get("errors") or [])
-            errors.append({"agent": "customer_agent", "error": error})
-            return_data["errors"] = errors
+                update_observation(
+                    observation,
+                    output=build_agent_trace_output(
+                        structured_result,
+                        agent_name="customer_agent",
+                        state=state,
+                        result_key="customer_result",
+                        extra_output={
+                            "customer_name": customer_name,
+                            "customer_profile": customer_profile,
+                            "tool_count": len(tool_results),
+                        },
+                    ),
+                    metadata={"agent": "customer_agent", "status": status},
+                )
 
-        return return_data
+            outputs = dict(state.get("agent_outputs") or {})
+            outputs["customer_agent"] = structured_result
+
+            completed_agents = list(state.get("completed_agents") or [])
+            if "customer_agent" not in completed_agents:
+                completed_agents.append("customer_agent")
+
+            response = AIMessage(content=summary)
+            return_data = {
+                "messages": [response],
+                "agent_outputs": outputs,
+                "current_step": (state.get("current_step") or 0) + 1,
+                "current_agent": "customer_agent",
+                "completed_agents": completed_agents,
+                "customer_result": structured_result,
+                "customer_profile": customer_profile,
+            }
+
+            if tool_errors:
+                errors = list(state.get("errors") or [])
+                errors.append({"agent": "customer_agent", "error": error})
+                return_data["errors"] = errors
+
+            return return_data
+        finally:
+            flush_langfuse()
 
     return run_agent_loop(
         state=state,
@@ -140,3 +208,11 @@ def customer_agent_node(state: AgentState) -> dict:
         result_key="customer_result", # 추가 : validation에서 활용
         max_iterations=3,
     )
+
+
+def _extract_customer_profile(tool_results: list[dict[str, Any]]) -> dict[str, Any]:
+    for item in tool_results:
+        if item.get("tool_name") != "get_customer_profile":
+            continue
+        return parse_customer_profile(item.get("tool_result"))
+    return {}

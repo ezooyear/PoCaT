@@ -197,8 +197,11 @@ def langfuse_observation(
         yield None
         return
 
-    with observation_context as observation:
-        yield observation
+    try:
+        with observation_context as observation:
+            yield observation
+    finally:
+        flush_langfuse()
 
 
 def update_observation(
