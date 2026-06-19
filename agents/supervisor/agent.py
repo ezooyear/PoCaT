@@ -171,6 +171,30 @@ def _synthesize_mode(state: AgentState) -> dict:
 
     user_query = state.get("user_query") or _get_last_user_text(state.get("messages", []))
     final_context = _build_final_context(state, user_query)
+    # 추가: Validation 실패 시 LLM 최종 합성 전에 확정 추천을 차단합니다.
+    if _is_validation_failed(final_context.get("validation_result")):
+        final_answer = _build_validation_blocked_answer(final_context)
+
+        return {
+            "messages": [AIMessage(content=final_answer)],
+            "draft_answer": final_answer,
+            "final_answer": final_answer,
+            "next": "FINISH",
+            "current_agent": "supervisor",
+            "current_step": len(state.get("plan") or []),
+            "agent_logs": _append_log(
+                state,
+                {
+                    "agent": "supervisor",
+                    "mode": "synthesize",
+                    "task_type": state.get("task_type"),
+                    "used_validation": True,
+                    "validation_blocked": True,
+                },
+            ),
+        }
+
+
     agent_results = _format_agent_results(final_context)
 
     prompt = SUPERVISOR_SYNTHESIZE_PROMPT.format(agent_results=agent_results)
@@ -662,6 +686,99 @@ def _direct_response(state: AgentState, user_query: str) -> dict:
         ),
     }
 
+def _get_validation_payload(validation_result: Any) -> dict[str, Any]:
+    """validation_result에서 실제 result payload를 안전하게 꺼냅니다."""
+    if not isinstance(validation_result, dict):
+        return {}
+
+    result = validation_result.get("result")
+    if isinstance(result, dict):
+        return result
+
+    return validation_result
+
+
+def _is_validation_failed(validation_result: Any) -> bool:
+    """
+    Validation이 실패했는지 판단합니다.
+    실패면 Supervisor가 확정 추천 답변을 생성하지 못하게 막습니다.
+    """
+    if not isinstance(validation_result, dict):
+        return False
+
+    payload = _get_validation_payload(validation_result)
+
+    if validation_result.get("status") == "failed":
+        return True
+
+    if payload.get("is_valid") is False:
+        return True
+
+    if payload.get("revision_required") is True:
+        return True
+
+    verify_result = payload.get("verify_result")
+    if isinstance(verify_result, dict):
+        if verify_result.get("is_valid") is False:
+            return True
+        if verify_result.get("revision_required") is True:
+            return True
+
+    return False
+
+
+def _build_validation_blocked_answer(final_context: dict[str, Any]) -> str:
+    """
+    Validation 실패 시 사용자에게 보여줄 안전한 최종 답변을 생성합니다.
+    - missing_fields가 있으면 필요한 정보만 질문
+    - missing_fields가 없으면 추천 보류와 확인 필요 항목 안내
+    """
+    validation_payload = _get_validation_payload(final_context.get("validation_result"))
+
+    missing_fields = (
+        validation_payload.get("missing_fields")
+        or final_context.get("missing_fields")
+        or []
+    )
+
+    blocking_issues = validation_payload.get("blocking_issues") or []
+
+    if not blocking_issues:
+        issues = validation_payload.get("issues") or []
+        for issue in issues:
+            if isinstance(issue, dict):
+                message = str(issue.get("message") or "").strip()
+                if message:
+                    blocking_issues.append(message)
+            else:
+                message = str(issue).strip()
+                if message:
+                    blocking_issues.append(message)
+
+    if missing_fields:
+        fields_text = "\n".join(f"- {field}" for field in missing_fields)
+
+        return (
+            "현재 정보만으로는 상품을 확정 추천하기 어렵습니다.\n\n"
+            "추천을 위해 아래 정보가 더 필요합니다.\n"
+            f"{fields_text}\n\n"
+            "위 정보를 알려주시면 고객 조건, 상품 조건, 가입 가능 여부를 다시 확인한 뒤 "
+            "추천을 이어서 도와드리겠습니다."
+        )
+
+    if not blocking_issues:
+        blocking_issues = ["추천 결과를 확정하기에 필요한 검증 정보가 충분하지 않습니다."]
+
+    issues_text = "\n".join(f"- {issue}" for issue in blocking_issues[:5])
+
+    return (
+        "입력하신 조건을 기준으로 확인했지만, 현재 추천 결과가 검증을 통과하지 못해 "
+        "특정 상품을 확정 추천하기 어렵습니다.\n\n"
+        "확인된 문제는 다음과 같습니다.\n"
+        f"{issues_text}\n\n"
+        "따라서 현재 단계에서는 추천을 보류하고, 고객 정보 조회 결과와 상품 조건, "
+        "계산 결과를 다시 확인한 뒤 안내드리는 것이 안전합니다."
+    )
 
 def _build_final_context(state: AgentState, user_query: str) -> dict:
     """
