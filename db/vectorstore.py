@@ -19,8 +19,8 @@ PDF_DIR = os.path.join(BASE_DIR, "data", "pdfs")
 CHROMA_DIR = os.path.join(BASE_DIR, "data", "chroma_db")
 
 # ─── 임베딩 및 리랭커 모델 설정 ───
-EMBEDDING_MODEL_NAME = "BAAI/bge-m3"
-RERANKER_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
+EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-small"
+RERANKER_MODEL_NAME = None
 
 # 프로세스 단위 싱글톤 캐시
 _EMBEDDINGS_INSTANCE = None
@@ -36,7 +36,7 @@ def _get_embeddings():
     if _EMBEDDINGS_INSTANCE is None:
         _EMBEDDINGS_INSTANCE = HuggingFaceEmbeddings(
             model_name=EMBEDDING_MODEL_NAME,
-            model_kwargs={"device": "cpu"},
+            model_kwargs={"device": "mps"},
             encode_kwargs={"normalize_embeddings": True},
         )
     return _EMBEDDINGS_INSTANCE
@@ -47,7 +47,7 @@ def _get_reranker() -> CrossEncoder:
     global _RERANKER_INSTANCE
     if _RERANKER_INSTANCE is None:
         print(f"🔄 리랭커 모델 로드 중... ({RERANKER_MODEL_NAME})")
-        _RERANKER_INSTANCE = CrossEncoder(RERANKER_MODEL_NAME, device="cpu")
+        _RERANKER_INSTANCE = CrossEncoder(RERANKER_MODEL_NAME, device="mps")
         print("✅ 리랭커 모델 로드 완료!")
     return _RERANKER_INSTANCE
 
@@ -170,78 +170,29 @@ def get_vectorstore():
 
 def search_products(query: str, k: int = 3) -> List[Document]:
     """
-    하이브리드 검색(Dense Vector + BM25 Sparse) 및 Cross-Encoder 리랭킹을 통해
-    관련이 가장 높은 최적의 부모 문서(Parent Document)들을 반환합니다.
+    초경량 임베딩 모델을 사용하여 ChromaDB에서 유사도 검색을 수행하고
+    관련이 높은 부모 문서(Parent Document)들을 반환합니다.
     """
+    import time
+    start = time.time()
+
     vectorstore = get_vectorstore()
     if vectorstore is None:
         print("⚠️ Vector DB를 찾을 수 없습니다. 빈 결과를 반환합니다.")
         return []
 
-    # 1. ChromaDB에 저장된 모든 자식 문서 로드 (BM25 색인용)
-    all_docs = _get_all_docs(vectorstore)
-    if not all_docs:
-        return []
+    # 1차 후보군 추출 개수 설정 (부모 문서 중복 제거를 고려하여 k의 5배수 추출)
+    candidates_limit = k * 5
 
-    # 2. 1차 후보군 추출 개수 설정 (최대 후보 25개, k 배수 확장)
-    candidates_limit = max(k * 6, 25)
-
-    # 3. Dense 검색 (유사도 검색)
+    # Dense 검색 (유사도 검색)
     dense_results = vectorstore.similarity_search(query, k=candidates_limit)
+    print(f"⏱️ [RAG 디버그] [Dense 유사도 검색] 소요 시간: {time.time() - start:.4f}s")
 
-    # 4. Sparse 검색 (BM25 검색)
-    sparse_results = _search_sparse_with_bm25(all_docs, query, candidates_limit)
-
-    # 5. 하이브리드 결과 병합 및 자식 청크 수준 중복 제거 (RRF - Reciprocal Rank Fusion 적용)
-    rrf_scores = {}
-    doc_map = {}
-    
-    # Dense 결과 가중치 계산
-    for rank, doc in enumerate(dense_results):
-        if doc and doc.page_content:
-            content = doc.page_content
-            rrf_scores[content] = rrf_scores.get(content, 0.0) + 1.0 / (60 + rank)
-            doc_map[content] = doc
-
-    # Sparse 결과 가중치 계산
-    for rank, doc in enumerate(sparse_results):
-        if doc and doc.page_content:
-            content = doc.page_content
-            rrf_scores[content] = rrf_scores.get(content, 0.0) + 1.0 / (60 + rank)
-            doc_map[content] = doc
-
-    if not rrf_scores:
-        return []
-
-    # RRF 점수 기준 정렬
-    sorted_contents = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
-    combined_candidates = [doc_map[content] for content, _ in sorted_contents]
-
-    # 6. Cross-Encoder 리랭킹 (Reranker)
-    reranker = _get_reranker()
-    
-    # 쿼리와 각 후보 문서의 '부모 본문(parent_content)'을 쌍으로 구성하여 예측
-    # 자식 청크 텍스트보다는 전체 흐름이 들어있는 부모 정보로 연관성을 비교하는 것이 핵심입니다.
-    pairs = []
-    for doc in combined_candidates:
-        parent_txt = doc.metadata.get("parent_content", doc.page_content)
-        pairs.append([query, parent_txt])
-
-    # 리랭커 점수 계산
-    scores = reranker.predict(pairs)
-    
-    # 문서와 점수를 매핑하여 정렬
-    ranked_docs = sorted(
-        zip(combined_candidates, scores),
-        key=lambda x: x[1],
-        reverse=True
-    )
-
-    # 7. 최종 결과 취합 및 부모 문서 수준 중복 제거 (Deduplicate Parent Chunks)
+    # 최종 결과 취합 및 부모 문서 수준 중복 제거 (Deduplicate Parent Chunks)
     final_docs = []
     seen_parents = set()
 
-    for doc, score in ranked_docs:
+    for doc in dense_results:
         parent_txt = doc.metadata.get("parent_content", doc.page_content)
         parent_id = doc.metadata.get("parent_id", parent_txt)
         
@@ -253,7 +204,6 @@ def search_products(query: str, k: int = 3) -> List[Document]:
                 metadata={
                     "source_file": doc.metadata.get("source_file", "알 수 없음"),
                     "page": doc.metadata.get("page", "?"),
-                    "score": float(score)  # 디버깅 및 분석용 점수 주입
                 }
             )
             final_docs.append(parent_doc)
@@ -261,6 +211,7 @@ def search_products(query: str, k: int = 3) -> List[Document]:
         if len(final_docs) >= k:
             break
 
+    print(f"⏱️ [RAG 디버그] [전체 search_products] 총 소요 시간: {time.time() - start:.4f}s")
     return final_docs
 
 

@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from datasets import Dataset
-from ragas import evaluate
+from ragas import evaluate, EvaluationDataset
 from ragas.metrics import (
     Faithfulness,
     AnswerRelevancy,
@@ -65,7 +65,7 @@ def main():
 
         # A. Retrieve contexts (Parent Chunks) with Query Reformulation and Dynamic K
         is_comparative = any(keyword in question for keyword in ["비교", "차이", "모두", "목록", "공통", "다른점"])
-        target_k = 6 if is_comparative else 3
+        target_k = 6 if is_comparative else 4
         
         reformed_query = reformulate_query(question)
         retrieved_docs = search_products(reformed_query, k=target_k)
@@ -91,15 +91,16 @@ def main():
             answer = f"Error occurred: {e}"
 
         eval_samples.append({
-            "question": question,
-            "contexts": contexts,
-            "answer": answer,
-            "ground_truth": ground_truth,
+            "user_input": question,
+            "retrieved_contexts": contexts,
+            "response": answer,
+            "reference": ground_truth,
         })
 
     # 4. Format Dataset for Ragas
     # Ragas expects: question (str), contexts (list[str]), answer (str), ground_truth (str)
-    dataset = Dataset.from_list(eval_samples)
+    hf_dataset = Dataset.from_list(eval_samples)
+    dataset = EvaluationDataset.from_hf_dataset(hf_dataset)
 
     # 5. Initialize Ragas Metrics with Judge LLM and Embeddings
     # This prevents Ragas from trying to access OpenAI API directly if not configured
@@ -116,8 +117,6 @@ def main():
         score_result = evaluate(
             dataset=dataset,
             metrics=metrics,
-            llm=judge_llm,
-            embeddings=embeddings,
         )
 
         # 7. Print and Save Results
