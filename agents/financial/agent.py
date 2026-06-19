@@ -12,6 +12,9 @@ from agents.financial.prompts import FINANCIAL_SYSTEM_PROMPT
 from agents.financial.tools import FINANCIAL_TOOLS, compare_switch_benefit
 
 
+DEFAULT_TAX_RATE = 0.154
+
+
 def financial_agent_node(state: AgentState) -> dict:
     result = run_agent_loop(
         state=state,
@@ -25,7 +28,284 @@ def financial_agent_node(state: AgentState) -> dict:
     if state.get("task_type") == "switch_analysis":
         result = _augment_switch_analysis_result(state, result)
 
+    result = _augment_maturity_estimate_result(state, result)
+
+    return _enforce_financial_role_boundary(result)
+
+
+def _augment_maturity_estimate_result(state: AgentState, result: dict) -> dict:
+    user_query = str(state.get("user_query") or _last_user_text(state.get("messages") or ""))
+    if not _is_maturity_estimate_query(user_query):
+        return result
+
+    customer_text = _extract_tool_result(state.get("customer_result"), "get_customer_accounts")
+    if not customer_text:
+        return result
+
+    current_account = _pick_current_account(customer_text, user_query)
+    if not current_account:
+        return result
+
+    estimate = _calculate_active_account_maturity_estimate(current_account)
+    if not estimate:
+        return result
+
+    estimate_text = _format_maturity_estimate(estimate)
+    existing_summary = _extract_financial_summary(result)
+    return _append_financial_tool_result(
+        result=result,
+        tool_name="estimate_active_account_maturity",
+        tool_args={
+            "account_number": estimate["account_number"],
+            "product_name": estimate["product_name"],
+            "current_balance": estimate["current_balance"],
+            "monthly_amount": estimate["monthly_amount"],
+            "applied_rate": estimate["applied_rate"],
+            "remaining_months": estimate["remaining_months"],
+            "maturity_date": estimate["maturity_date"],
+            "tax_rate": DEFAULT_TAX_RATE,
+        },
+        tool_result=estimate_text,
+        replace_missing_summary=True,
+        replace_summary=_contains_latex_formula(existing_summary),
+    )
+
+
+def _enforce_financial_role_boundary(result: dict) -> dict:
+    financial_result = result.get("financial_result")
+    if not isinstance(financial_result, dict):
+        return result
+
+    payload = financial_result.get("result", {})
+    if not isinstance(payload, dict):
+        return result
+
+    summary = str(payload.get("summary") or "")
+    if not _contains_recommendation_claim(summary):
+        return result
+
+    tool_results = payload.get("tool_results", [])
+    if not isinstance(tool_results, list):
+        tool_results = []
+
+    payload["summary"] = _build_calculation_only_summary(tool_results)
+    payload["role_boundary_enforced"] = True
+    payload["removed_recommendation_claim"] = summary
+    financial_result["result"] = payload
+    result["financial_result"] = financial_result
+
+    agent_outputs = dict(result.get("agent_outputs") or {})
+    if isinstance(agent_outputs.get("financial_agent"), dict):
+        agent_outputs["financial_agent"]["result"] = payload
+    result["agent_outputs"] = agent_outputs
+
     return result
+
+
+def _contains_recommendation_claim(summary: str) -> bool:
+    normalized = re.sub(r"\s+", "", str(summary or "")).lower()
+    if not normalized:
+        return False
+
+    recommendation_patterns = [
+        "가장잘맞는상품",
+        "가장적합한상품",
+        "추천상품",
+        "추천드립니다",
+        "추천합니다",
+        "가입을권장",
+        "선택하는것이좋",
+        "bestproduct",
+        "recommend",
+    ]
+    return any(pattern in normalized for pattern in recommendation_patterns)
+
+
+def _build_calculation_only_summary(tool_results: list[dict[str, Any]]) -> str:
+    calculation_outputs = [
+        str(item.get("tool_result"))
+        for item in tool_results
+        if isinstance(item, dict) and item.get("tool_result")
+    ]
+
+    if calculation_outputs:
+        return (
+            "Financial Agent는 계산 및 비교 결과만 제공합니다. "
+            "상품 추천이나 최종 선택 판단은 recommend_agent에서 수행해야 합니다.\n\n"
+            + "\n\n".join(calculation_outputs)
+        )
+
+    return (
+        "Financial Agent는 상품 추천을 생성하지 않습니다. "
+        "계산에 필요한 입력값 또는 도구 실행 결과가 없어 추천성 문장을 제거했습니다."
+    )
+
+
+def _append_financial_tool_result(
+    result: dict,
+    tool_name: str,
+    tool_args: dict[str, Any],
+    tool_result: str,
+    replace_missing_summary: bool = False,
+    replace_summary: bool = False,
+) -> dict:
+    financial_result = result.get("financial_result")
+    if not isinstance(financial_result, dict):
+        return result
+
+    payload = financial_result.get("result", {})
+    if not isinstance(payload, dict):
+        return result
+
+    tool_results = payload.get("tool_results", [])
+    if not isinstance(tool_results, list):
+        tool_results = []
+
+    if not any(isinstance(item, dict) and item.get("tool_name") == tool_name for item in tool_results):
+        tool_results.append(
+            {
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "tool_result": tool_result,
+            }
+        )
+    payload["tool_results"] = tool_results
+
+    summary = str(payload.get("summary") or "")
+    if replace_summary or (replace_missing_summary and _looks_like_missing_info_summary(summary)):
+        payload["summary"] = tool_result
+    elif tool_result not in summary:
+        payload["summary"] = f"{summary}\n\n{tool_result}".strip()
+
+    financial_result["result"] = payload
+    result["financial_result"] = financial_result
+
+    agent_outputs = dict(result.get("agent_outputs") or {})
+    if isinstance(agent_outputs.get("financial_agent"), dict):
+        agent_outputs["financial_agent"]["result"] = payload
+    result["agent_outputs"] = agent_outputs
+
+    return result
+
+
+def _extract_financial_summary(result: dict) -> str:
+    financial_result = result.get("financial_result")
+    if not isinstance(financial_result, dict):
+        return ""
+    payload = financial_result.get("result", {})
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("summary") or "")
+
+
+def _contains_latex_formula(summary: str) -> bool:
+    latex_markers = [
+        r"\text",
+        r"\times",
+        r"\frac",
+        r"\approx",
+        r"\[",
+        r"\]",
+        "[ \\text",
+    ]
+    return any(marker in str(summary or "") for marker in latex_markers)
+
+
+def _is_maturity_estimate_query(user_query: str) -> bool:
+    normalized = re.sub(r"\s+", "", user_query or "")
+    if "만기" not in normalized:
+        return False
+
+    targets = ["수령액", "이자", "세전이자", "세후이자", "받을돈", "받는돈"]
+    actions = ["계산", "예상", "얼마", "알려", "받"]
+    return any(keyword in normalized for keyword in targets) and any(
+        keyword in normalized for keyword in actions
+    )
+
+
+def _last_user_text(messages: Any) -> str:
+    if not isinstance(messages, list):
+        return ""
+    for message in reversed(messages):
+        if isinstance(message, tuple) and len(message) >= 2 and message[0] in ["user", "human"]:
+            return str(message[1])
+        if getattr(message, "type", None) in ["user", "human"]:
+            return str(getattr(message, "content", ""))
+    return ""
+
+
+def _calculate_active_account_maturity_estimate(account: dict[str, Any]) -> dict[str, Any] | None:
+    current_balance = _to_int(account.get("current_balance"))
+    monthly_amount = _to_int(account.get("monthly_amount")) or 0
+    applied_rate = _to_float(account.get("applied_rate"))
+    remaining_months = _calculate_remaining_months(account)
+    maturity_date = _parse_date(account.get("maturity_date"))
+
+    if not current_balance or current_balance <= 0:
+        return None
+    if applied_rate is None or applied_rate < 0:
+        return None
+    if not remaining_months or remaining_months <= 0:
+        return None
+
+    annual_rate = applied_rate / 100
+    current_balance_interest = current_balance * annual_rate * remaining_months / 12
+    future_principal = monthly_amount * remaining_months
+    future_payment_interest = sum(
+        monthly_amount * annual_rate * (remaining_months - payment_index) / 12
+        for payment_index in range(remaining_months)
+    )
+    before_tax_interest = current_balance_interest + future_payment_interest
+    tax = before_tax_interest * DEFAULT_TAX_RATE
+    after_tax_interest = before_tax_interest - tax
+    maturity_amount = current_balance + future_principal + after_tax_interest
+
+    return {
+        "account_number": str(account.get("account_number") or "-"),
+        "product_name": str(account.get("product_name") or "-"),
+        "product_type": str(account.get("product_type") or "-"),
+        "current_balance": current_balance,
+        "monthly_amount": monthly_amount,
+        "future_principal": future_principal,
+        "applied_rate": applied_rate,
+        "remaining_months": remaining_months,
+        "maturity_date": maturity_date.isoformat() if maturity_date else str(account.get("maturity_date") or "-"),
+        "before_tax_interest": before_tax_interest,
+        "tax": tax,
+        "after_tax_interest": after_tax_interest,
+        "maturity_amount": maturity_amount,
+    }
+
+
+def _format_maturity_estimate(estimate: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "현재 확인 가능한 계좌 정보 기준 만기 예상 수령액입니다.",
+            "",
+            "계산 기준",
+            f"- 상품명: {estimate['product_name']}",
+            f"- 계좌번호: {estimate['account_number']}",
+            f"- 현재잔액: {_format_won(estimate['current_balance'])}",
+            f"- 월 납입액: {_format_won(estimate['monthly_amount'])}",
+            f"- 적용금리: {estimate['applied_rate']:.2f}%",
+            f"- 남은 기간: {estimate['remaining_months']}개월",
+            f"- 만기일: {estimate['maturity_date']}",
+            f"- 적용 세율: {DEFAULT_TAX_RATE * 100:.1f}%",
+            "",
+            "계산 결과",
+            f"- 남은 기간 추가 납입 원금: {_format_won(estimate['future_principal'])}",
+            f"- 세전 예상 이자: {_format_won(estimate['before_tax_interest'])}",
+            f"- 예상 세금: {_format_won(estimate['tax'])}",
+            f"- 세후 예상 이자: {_format_won(estimate['after_tax_interest'])}",
+            f"- 만기 예상 수령액: {_format_won(estimate['maturity_amount'])}",
+            "",
+            "이 계산은 현재잔액, 월 납입액, 기본 적용금리만 사용한 추정치입니다. 우대금리, 실제 납입일, 납입 누락 여부, 은행의 실제 이자 계산 방식에 따라 최종 금액은 달라질 수 있습니다.",
+        ]
+    )
+
+
+def _format_won(value: Any) -> str:
+    return f"{float(value):,.0f}원"
 
 
 def _augment_switch_analysis_result(state: AgentState, result: dict) -> dict:
@@ -194,7 +474,13 @@ def _parse_table_rows(table_text: str) -> list[dict[str, str]]:
         if "|" not in line:
             continue
         parts = [part.strip() for part in line.split("|")]
-        if not header and "customer_id" in line.lower():
+        lower_line = line.lower()
+        if not header and (
+            "customer_id" in lower_line
+            or "account_number" in lower_line
+            or "current_balance" in lower_line
+            or "monthly_amount" in lower_line
+        ):
             header = parts
             continue
         if header and set(line) == {"-"}:
@@ -247,9 +533,15 @@ def _to_float(value: Any) -> float | None:
 def _looks_like_missing_info_summary(summary: str) -> bool:
     missing_markers = [
         "정보가 부족",
-        "판단하기 어렵",
-        "구체적인 정보가 없",
+        "추가 정보",
+        "필요 정보",
+        "정확한",
+        "바로 확인이 어렵",
+        "계산하기 위해 필요한",
+        "확보돼야",
         "알려 주시면",
-        "비교해 드릴 수 있습니다",
+        "?뺣낫",
+        "遺議",
+        "?뚮젮",
     ]
-    return any(marker in summary for marker in missing_markers)
+    return any(marker in str(summary or "") for marker in missing_markers)
