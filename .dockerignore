@@ -1,0 +1,11 @@
+.git
+.agents
+.codex
+.vscode
+venv
+.venv
+__pycache__
+*.pyc
+.DS_Store
+.env
+data/chroma_db
