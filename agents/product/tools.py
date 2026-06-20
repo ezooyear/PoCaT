@@ -67,13 +67,20 @@ def search_terms(query: str) -> str:
 
 
 def extract_product_candidates_from_search_results(raw_results: Any) -> list[dict[str, Any]]:
+    # 리스트 또는 단일 문자열 여부와 상관없이 모두 '---' 구분자를 분석하여 최종 청크 단위로 분할
     if isinstance(raw_results, list):
-        chunks = [str(item).strip() for item in raw_results if str(item).strip()]
+        raw_list = raw_results
     else:
-        text = str(raw_results or "").strip()
+        raw_list = [raw_results]
+
+    chunks = []
+    for item in raw_list:
+        text = str(item or "").strip()
         if not text:
-            return []
-        chunks = [chunk.strip() for chunk in re.split(r"\n\s*---+\s*\n", text) if chunk.strip()]
+            continue
+        # 개별 텍스트 내에 존재하는 '---' 구분자로 세부 분할
+        split_parts = [part.strip() for part in re.split(r"\n\s*---+\s*\n", text) if part.strip()]
+        chunks.extend(split_parts)
 
     candidates = []
     seen = set()
@@ -95,7 +102,11 @@ def extract_product_candidates_from_search_results(raw_results: Any) -> list[dic
 
 def _extract_product_name_from_chunk(chunk: str) -> str:
     keywords = ("KB", "적금", "예금", "통장", "청년", "군인")
+    # 상품명 후보에서 제외할 무효 키워드 목록
+    invalid_markers = ["적용조건", "우대이율", "신규가입일", "영업점", "가입방법", "유의사항", "가입대상", "가입자격", "가입채널", "충족사례", "가입:", "이율", "금리"]
+    raw_name = ""
 
+    # 키워드가 포함된 라인 우선 검색
     for line in chunk.splitlines():
         stripped = line.strip()
         if not stripped:
@@ -104,15 +115,33 @@ def _extract_product_name_from_chunk(chunk: str) -> str:
             continue
         if "출처:" in stripped and "/ p." in stripped:
             continue
-        if len(stripped) > 100:
+        if len(stripped) > 80:
+            continue
+        # 상품명이 될 수 없는 무효 문구 필터링
+        if any(marker in stripped for marker in invalid_markers):
             continue
         if any(keyword in stripped for keyword in keywords):
-            return stripped
+            raw_name = stripped
+            break
 
-    for line in chunk.splitlines():
-        stripped = line.strip()
-        if stripped and not stripped.startswith("["):
-            return stripped[:100]
+    # 키워드가 포함된 라인이 없으면 첫 줄 선택
+    if not raw_name:
+        for line in chunk.splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("["):
+                # 상품명이 될 수 없는 무효 문구 필터링
+                if any(marker in stripped for marker in invalid_markers):
+                    continue
+                raw_name = stripped[:80]
+                break
+
+    # 추출된 상품명 정제 (괄호, 따옴표, '상품설명서' 텍스트 제거)
+    if raw_name:
+        # 1. '상품설명서' 또는 '상품 설명서' 단어 먼저 제거
+        name = re.sub(r"\s*상품설명서|\s*상품\s*설명서", "", raw_name).strip()
+        # 2. 양 끝의 대괄호, 따옴표, 괄호 등 기호 제거 (제거 순서 교정)
+        name = re.sub(r"^[「『\"'\[\(]+|[」』\"'\]\)]+$", "", name).strip()
+        return name
 
     return ""
 
