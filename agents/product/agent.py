@@ -110,6 +110,22 @@ def _normalize_product_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     term_options = _extract_term_options(raw_text)
     preferential_conditions = _extract_preferential_conditions(raw_text)
 
+    source_file = candidate.get("source_file")
+    page = candidate.get("page")
+    source_pages = candidate.get("source_pages") or ([page] if page else [])
+
+    evidence = candidate.get("evidence") or [
+        {
+            "field": "raw_text",
+            "value": raw_text[:500],
+            "source": "rag_search",
+            "source_file": source_file,
+            "page": page,
+            "pages": source_pages,
+            "text": raw_text[:500],
+            "confidence": "medium",
+        }
+    ]
     return {
         "product_id": candidate.get("product_id"),
         "product_name": name,
@@ -126,12 +142,10 @@ def _normalize_product_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         "preferential_conditions_text": _extract_preferential_conditions_text(raw_text),
         "preferential_conditions": preferential_conditions,
         "evidence": [
-            {
-                "field": "raw_text",
-                "value": raw_text[:200],
-                "source": "rag_search",
-                "text": raw_text[:200],
-                "confidence": "low",
+            {   "source_file": source_file,
+                "page": page,
+                "source_pages": source_pages,
+                "evidence": evidence,
             }
         ],
         "source": "rag_search",
@@ -472,10 +486,17 @@ def product_agent_node(state: AgentState) -> dict:
                 ]
                 product_result_raw["result"] = payload
 
+                product_evidence = []
+                for product in products:
+                    if isinstance(product, dict):
+                        product_evidence.extend(product.get("evidence") or [])
+
+                product_result_raw["evidence"] = product_evidence
+
                 product_result_wrapped = make_agent_result(
                     status=product_result_raw.get("status", "success"),
                     result=payload,
-                    evidence=product_result_raw.get("evidence", []),
+                    evidence=product_evidence,
                     error=product_result_raw.get("error"),
                 )
                 result["product_result"] = product_result_wrapped
@@ -491,7 +512,8 @@ def product_agent_node(state: AgentState) -> dict:
                     error=product_result_raw.get("error"),
                 )
             result["agent_outputs"] = agent_outputs
-            result["product_candidates"] = product_candidates
+            result["product_candidates"] = products
+            result["products"] = products
 
             # ---- sub-span 5: finalize --------------------------------------
             fs = time.time()
