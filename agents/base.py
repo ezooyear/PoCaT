@@ -24,12 +24,94 @@ def make_agent_result(
     evidence: Optional[list[dict[str, Any]]] = None,
     error: Optional[str] = None,
 ) -> dict[str, Any]:
-    return {
+    payload = dict(result or {})
+    summary = payload.get("summary")
+
+    output: dict[str, Any] = {
         "status": status,
-        "result": result or {},
+        "summary": summary,
+        "result": payload,
         "evidence": evidence or [],
         "error": error,
     }
+
+    for key, value in payload.items():
+        if key in output:
+            continue
+        output[key] = value
+
+    return output
+
+
+def _get_nested_value(data: Any, path: list[str]) -> tuple[Any, bool]:
+    value = data
+    for key in path:
+        if not isinstance(value, dict) or key not in value:
+            return None, False
+        value = value[key]
+    return value, True
+
+
+def _find_value_by_paths(data: Any, paths: list[list[str]]) -> dict[str, Any]:
+    for path in paths:
+        value, found = _get_nested_value(data, path)
+        if found:
+            return {"data": value, "source": ".".join(path)}
+    return {"data": None, "source": ""}
+
+
+def get_customer_profile(state: dict[str, Any]) -> dict[str, Any]:
+    paths = [
+        ["customer_result", "customer_profile"],
+        ["customer_result", "result", "customer_profile"],
+        ["agent_outputs", "customer_agent", "customer_profile"],
+        ["agent_outputs", "customer_agent", "result", "customer_profile"],
+    ]
+    result = _find_value_by_paths(state, paths)
+    return result
+
+
+def get_product_candidates(state: dict[str, Any]) -> dict[str, Any]:
+    paths = [
+        ["product_result", "products"],
+        ["product_result", "result", "products"],
+        ["product_result", "result", "product_candidates"],
+        ["agent_outputs", "product_agent", "product_result", "products"],
+        ["agent_outputs", "product_agent", "product_result", "result", "products"],
+        ["agent_outputs", "product_agent", "result", "products"],
+        ["agent_outputs", "product_agent", "result", "product_candidates"],
+    ]
+    return _find_value_by_paths(state, paths)
+
+
+def get_financial_calculations(state: dict[str, Any]) -> dict[str, Any]:
+    paths = [
+        ["financial_result", "calculations"],
+        ["financial_result", "result", "calculations"],
+        ["agent_outputs", "financial_agent", "financial_result", "calculations"],
+        ["agent_outputs", "financial_agent", "financial_result", "result", "calculations"],
+        ["agent_outputs", "financial_agent", "result", "calculations"],
+    ]
+    return _find_value_by_paths(state, paths)
+
+
+def get_recommendations(state: dict[str, Any]) -> dict[str, Any]:
+    paths = [
+        ["recommend_result", "recommendations"],
+        ["recommend_result", "result", "recommendations"],
+        ["agent_outputs", "recommend_agent", "recommend_result", "recommendations"],
+        ["agent_outputs", "recommend_agent", "recommend_result", "result", "recommendations"],
+        ["agent_outputs", "recommend_agent", "result", "recommendations"],
+    ]
+    return _find_value_by_paths(state, paths)
+
+
+def get_validation_result(state: dict[str, Any]) -> dict[str, Any]:
+    paths = [
+        ["validation_result"],
+        ["agent_outputs", "validation_agent", "validation_result"],
+    ]
+    return _find_value_by_paths(state, paths)
 
 
 def build_prev_context(
@@ -130,7 +212,7 @@ def run_agent_loop(
 
     try:
         with langfuse_observation(
-            name=output_key,
+            name=span_name or output_key,
             as_type="span",
             input=build_agent_trace_input(
                 state,

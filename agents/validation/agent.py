@@ -82,22 +82,36 @@ def validation_agent_node(state: AgentState) -> dict[str, Any]:
 
     is_valid = bool(verify_result.get("is_valid"))
     validation_summary = _extract_validation_summary(verify_result, state)
+    warnings = [
+        issue.get("message") if isinstance(issue, dict) else str(issue)
+        for issue in (verify_result.get("issues") or [])
+        if isinstance(issue, dict) and issue.get("level") == "warning"
+    ]
+    failure_reasons = [
+        issue.get("message") if isinstance(issue, dict) else str(issue)
+        for issue in (verify_result.get("issues") or [])
+        if isinstance(issue, dict) and issue.get("level") == "error"
+    ]
+    validation_status = (
+        "passed_with_warnings" if is_valid and warnings else
+        "passed" if is_valid else
+        "failed"
+    )
 
     validation_result = make_agent_result(
-        status="success" if is_valid else "failed",
+        status=validation_status,
         result={
             "verify_result": verify_result,
             "is_valid": is_valid,
             "issues": verify_result.get("issues", []),
+            "failure_reasons": failure_reasons,
+            "warnings": warnings,
+            "checks": verify_result.get("checked_items", rule_checked_items),
             "revision_required": validation_summary["revision_required"],
-
-            # 추가: Supervisor final이 바로 읽을 수 있는 구조화 필드
             "failure_type": validation_summary["failure_type"],
             "missing_fields": validation_summary["missing_fields"],
             "blocking_issues": validation_summary["blocking_issues"],
             "awaiting_user_input": validation_summary["awaiting_user_input"],
-
-            "checked_items": verify_result.get("checked_items", rule_checked_items),
             "summary": verify_result.get("summary"),
             "final_notes": verify_result.get("final_notes", []),
         },

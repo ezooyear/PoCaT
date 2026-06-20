@@ -29,6 +29,7 @@ def financial_agent_node(state: AgentState) -> dict:
         result = _augment_switch_analysis_result(state, result)
 
     result = _augment_maturity_estimate_result(state, result)
+    result = _ensure_financial_calculations(result)
 
     return _enforce_financial_role_boundary(result)
 
@@ -387,6 +388,96 @@ def _augment_switch_analysis_result(state: AgentState, result: dict) -> dict:
     return result
 
 
+def _ensure_financial_calculations(result: dict) -> dict:
+    financial_result = result.get("financial_result")
+    if not isinstance(financial_result, dict):
+        return result
+
+    payload = financial_result.get("result", {})
+    if not isinstance(payload, dict):
+        return result
+
+    tool_results = payload.get("tool_results") or []
+    calculations = _parse_financial_calculations(tool_results)
+
+    payload["calculations"] = calculations
+    if not calculations:
+        payload["missing_fields"] = payload.get("missing_fields") or ["term_months", "applied_rate"]
+        payload["fallback_reason"] = payload.get("fallback_reason") or "missing_required_calculation_fields"
+        if payload.get("status") == "success":
+            payload["status"] = "needs_check"
+        if financial_result.get("status") == "success":
+            financial_result["status"] = "needs_check"
+        if not payload.get("summary"):
+            payload["summary"] = "계산에 필요한 필수 정보가 부족하여 financial_result.calculations를 생성하지 못했습니다."
+
+    financial_result["result"] = payload
+    result["financial_result"] = financial_result
+
+    agent_outputs = dict(result.get("agent_outputs") or {})
+    if isinstance(agent_outputs.get("financial_agent"), dict):
+        agent_outputs["financial_agent"]["result"] = payload
+    result["agent_outputs"] = agent_outputs
+
+    return result
+
+
+def _parse_financial_calculations(tool_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    calculations: list[dict[str, Any]] = []
+    for item in tool_results:
+        if not isinstance(item, dict):
+            continue
+        tool_name = item.get("tool_name")
+        tool_args = item.get("tool_args") or {}
+        tool_result = str(item.get("tool_result") or "")
+
+        if tool_name == "estimate_active_account_maturity":
+            calculation = {
+                "product_name": str(tool_args.get("product_name") or "미확인 상품"),
+                "product_type": str(tool_args.get("product_type") or "적금"),
+                "monthly_amount": int(tool_args.get("monthly_amount") or 0),
+                "term_months": int(tool_args.get("remaining_months") or 0),
+                "payment_count": int(tool_args.get("remaining_months") or 0),
+                "applied_rate": float(tool_args.get("applied_rate") or 0.0),
+                "base_rate": float(tool_args.get("applied_rate") or 0.0),
+                "bonus_rate": 0.0,
+                "principal": int(tool_args.get("current_balance") or 0) + int(tool_args.get("monthly_amount") or 0) * int(tool_args.get("remaining_months") or 0),
+                "estimated_interest_before_tax": _extract_amount_from_text(tool_result, "세전 예상 이자"),
+                "estimated_interest_after_tax": _extract_amount_from_text(tool_result, "세후 예상 이자"),
+                "estimated_maturity_amount": _extract_amount_from_text(tool_result, "만기 예상 수령액"),
+                "calculation_method": "monthly_installment_simple_estimate",
+                "calculation_note": "단순 추정 형식입니다.",
+            }
+            calculations.append(calculation)
+        elif tool_name == "calculate_interest":
+            calculation = {
+                "product_name": str(tool_args.get("product_name") or "미확인 상품"),
+                "product_type": str(tool_args.get("product_type") or "예금"),
+                "monthly_amount": int(tool_args.get("monthly_payment") or 0),
+                "term_months": int(tool_args.get("months") or 0),
+                "payment_count": int(tool_args.get("months") or 0),
+                "applied_rate": float(tool_args.get("annual_rate") or 0.0),
+                "base_rate": float(tool_args.get("annual_rate") or 0.0),
+                "bonus_rate": 0.0,
+                "principal": int(tool_args.get("principal") or 0) or int(tool_args.get("monthly_payment") or 0) * int(tool_args.get("months") or 0),
+                "estimated_interest_before_tax": _extract_amount_from_text(tool_result, "세전 이자"),
+                "estimated_interest_after_tax": _extract_amount_from_text(tool_result, "세후 이자"),
+                "estimated_maturity_amount": _extract_amount_from_text(tool_result, "만기 예상 수령액"),
+                "calculation_method": "monthly_or_deposit_interest_estimate",
+                "calculation_note": "실제 은행 계산 방식과 다를 수 있는 단순 추정치입니다.",
+            }
+            calculations.append(calculation)
+    return calculations
+
+
+def _extract_amount_from_text(text: str, label: str) -> int | None:
+    pattern = rf"{re.escape(label)}[:\s]*([0-9,]+)원"
+    match = re.search(pattern, text)
+    if match:
+        return int(match.group(1).replace(",", ""))
+    return None
+
+
 def _extract_tool_result(result_container: Any, tool_name: str) -> str:
     if not isinstance(result_container, dict):
         return ""
@@ -540,8 +631,5 @@ def _looks_like_missing_info_summary(summary: str) -> bool:
         "계산하기 위해 필요한",
         "확보돼야",
         "알려 주시면",
-        "?뺣낫",
-        "遺議",
-        "?뚮젮",
     ]
     return any(marker in str(summary or "") for marker in missing_markers)

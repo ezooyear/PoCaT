@@ -10,10 +10,11 @@ span tree:
     └── product_agent.finalize
 """
 
+import re
 import time
 from typing import Any
 
-from agents.base import run_agent_loop
+from agents.base import make_agent_result, run_agent_loop
 from agents.product.prompts import PRODUCT_SYSTEM_PROMPT
 from agents.product.tools import PRODUCT_TOOLS, extract_product_candidates_from_search_results
 from graph.state import AgentState
@@ -97,6 +98,123 @@ def _determine_fallback_reason(
         return "empty_product_candidates", "fallback"
 
     return None, "success"
+
+
+def _normalize_product_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    raw_text = str(candidate.get("raw_text") or "")
+    name = str(candidate.get("product_name") or "미확인 상품").strip()
+    bank = _extract_bank(raw_text)
+    product_type = _extract_product_type(raw_text)
+    base_rate, max_rate = _extract_rates(raw_text)
+    min_amount, max_amount = _extract_amount_bounds(raw_text)
+    term_options = _extract_term_options(raw_text)
+    preferential_conditions = _extract_preferential_conditions(raw_text)
+
+    return {
+        "product_id": candidate.get("product_id"),
+        "product_name": name,
+        "bank": bank,
+        "product_type": product_type,
+        "base_rate": base_rate,
+        "max_rate": max_rate,
+        "base_rate_text": f"연 {base_rate:.2f}%" if base_rate is not None else None,
+        "max_rate_text": f"연 {max_rate:.2f}%" if max_rate is not None else None,
+        "min_monthly_amount": min_amount,
+        "max_monthly_amount": max_amount,
+        "term_options_months": term_options,
+        "eligibility_text": _extract_eligibility_text(raw_text),
+        "preferential_conditions_text": _extract_preferential_conditions_text(raw_text),
+        "preferential_conditions": preferential_conditions,
+        "evidence": [
+            {
+                "field": "raw_text",
+                "value": raw_text[:200],
+                "source": "rag_search",
+                "text": raw_text[:200],
+                "confidence": "low",
+            }
+        ],
+        "source": "rag_search",
+        "raw_text": raw_text,
+    }
+
+
+def _extract_bank(text: str) -> str | None:
+    lowered = text.lower()
+    if "국민은행" in lowered:
+        return "KB국민은행"
+    if "우리은행" in lowered:
+        return "우리은행"
+    if "신한은행" in lowered:
+        return "신한은행"
+    if "하나은행" in lowered:
+        return "하나은행"
+    if "카카오뱅크" in lowered:
+        return "카카오뱅크"
+    return None
+
+
+def _extract_product_type(text: str) -> str | None:
+    lowered = text.lower()
+    if "적금" in lowered:
+        return "적금"
+    if "예금" in lowered:
+        return "예금"
+    if "부금" in lowered:
+        return "부금"
+    return None
+
+
+def _extract_rates(text: str) -> tuple[float | None, float | None]:
+    matches = [float(m.replace(",", "")) for m in re.findall(r"([0-9]+(?:\.[0-9]+)?)\s*%", text)]
+    if not matches:
+        return None, None
+    if len(matches) == 1:
+        return matches[0], matches[0]
+    return matches[0], max(matches)
+
+
+def _extract_amount_bounds(text: str) -> tuple[int | None, int | None]:
+    min_vals = [int(re.sub(r"[^0-9]", "", m)) for m in re.findall(r"최소\s*가입\s*금액[:\s]*([0-9,]+)원", text)]
+    max_vals = [int(re.sub(r"[^0-9]", "", m)) for m in re.findall(r"최대\s*가입\s*금액[:\s]*([0-9,]+)원", text)]
+    if not min_vals:
+        min_vals = [int(re.sub(r"[^0-9]", "", m)) for m in re.findall(r"월\s*최소\s*납입[:\s]*([0-9,]+)원", text)]
+    if not max_vals:
+        max_vals = [int(re.sub(r"[^0-9]", "", m)) for m in re.findall(r"월\s*최대\s*납입[:\s]*([0-9,]+)원", text)]
+    return (min_vals[0] if min_vals else None, max_vals[0] if max_vals else None)
+
+
+def _extract_term_options(text: str) -> list[int]:
+    months = [int(m) for m in re.findall(r"([0-9]{1,2})\s*개월", text)]
+    return sorted(set(months))
+
+
+def _extract_eligibility_text(text: str) -> str | None:
+    match = re.search(r"가입\s*조건[:\s]*(.+?)(?:\n|$)", text)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def _extract_preferential_conditions_text(text: str) -> str | None:
+    match = re.search(r"우대.*금리[:\s]*(.+?)(?:\n|$)", text)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def _extract_preferential_conditions(text: str) -> list[dict[str, Any]]:
+    conditions = []
+    for keyword in ["급여이체", "자동이체", "카드", "주거래", "마케팅"]:
+        if keyword in text:
+            conditions.append(
+                {
+                    "name": keyword,
+                    "condition": f"{keyword} 조건을 만족하면 우대금리 적용 가능",
+                    "rate": None,
+                }
+            )
+    return conditions
 
 
 def _analyze_product_result_storage(result: dict) -> dict[str, Any]:
@@ -290,17 +408,18 @@ def product_agent_node(state: AgentState) -> dict:
                 product_candidates = extract_product_candidates_from_search_results(
                     raw_search_results
                 )
+                products = [_normalize_product_candidate(candidate) for candidate in product_candidates]
 
-                outer_meta["product_count"] = len(product_candidates)
-                outer_meta["structured_product_count"] = len(product_candidates)
+                outer_meta["product_count"] = len(products)
+                outer_meta["structured_product_count"] = len(products)
                 outer_meta["structured_product_names"] = [
-                    c.get("product_name", "") for c in product_candidates[:10]
+                    c.get("product_name", "") for c in products[:10]
                 ]
 
                 update_observation(
                     parse_span,
                     output={
-                        "product_count": len(product_candidates),
+                        "product_count": len(products),
                         "product_names": outer_meta["structured_product_names"],
                         "raw_result_count": len(raw_search_results),
                     },
@@ -315,7 +434,7 @@ def product_agent_node(state: AgentState) -> dict:
             fallback_reason, status = _determine_fallback_reason(
                 search_enabled=search_enabled,
                 search_info=search_info,
-                product_candidates=product_candidates,
+                product_candidates=products,
                 tool_error_count=tool_error_count,
             )
             outer_meta["fallback_reason"] = fallback_reason
@@ -329,7 +448,7 @@ def product_agent_node(state: AgentState) -> dict:
                 else {}
             )
 
-            if not product_candidates:
+            if not products:
                 if isinstance(product_result_raw, dict):
                     product_result_raw["status"] = "failed"
                     product_result_raw["error"] = (
@@ -342,16 +461,35 @@ def product_agent_node(state: AgentState) -> dict:
                         )
 
             if isinstance(product_result_raw, dict) and isinstance(payload, dict):
+                payload["products"] = products
                 payload["product_candidates"] = product_candidates
+                payload["structured_product_count"] = len(products)
+                payload["structured_product_names"] = [
+                    item["product_name"] for item in products
+                ]
                 payload["searched_products"] = [
-                    item["product_name"] for item in product_candidates
+                    item["product_name"] for item in products
                 ]
                 product_result_raw["result"] = payload
+
+                product_result_wrapped = make_agent_result(
+                    status=product_result_raw.get("status", "success"),
+                    result=payload,
+                    evidence=product_result_raw.get("evidence", []),
+                    error=product_result_raw.get("error"),
+                )
+                result["product_result"] = product_result_wrapped
+            else:
                 result["product_result"] = product_result_raw
 
             agent_outputs = dict(result.get("agent_outputs") or {})
             if isinstance(agent_outputs.get("product_agent"), dict):
-                agent_outputs["product_agent"]["result"] = product_result_raw.get("result", {})
+                agent_outputs["product_agent"] = make_agent_result(
+                    status=product_result_raw.get("status", "success"),
+                    result=payload if isinstance(payload, dict) else {},
+                    evidence=product_result_raw.get("evidence", []),
+                    error=product_result_raw.get("error"),
+                )
             result["agent_outputs"] = agent_outputs
             result["product_candidates"] = product_candidates
 
