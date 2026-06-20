@@ -28,6 +28,9 @@ def financial_agent_node(state: AgentState) -> dict:
     if state.get("task_type") == "switch_analysis":
         result = _augment_switch_analysis_result(state, result)
 
+    if state.get("task_type") == "recommendation":
+        result = _augment_recommendation_financial_results(state, result)
+
     result = _augment_maturity_estimate_result(state, result)
     result = _ensure_financial_calculations(result)
 
@@ -633,3 +636,267 @@ def _looks_like_missing_info_summary(summary: str) -> bool:
         "알려 주시면",
     ]
     return any(marker in str(summary or "") for marker in missing_markers)
+
+
+def _augment_recommendation_financial_results(state: AgentState, result: dict) -> dict:
+    """
+    추천 흐름에서 recommend_agent가 읽을 수 있는 financial_results를 만듭니다.
+
+    transaction_months는 고객 거래개월 수이므로 계약기간으로 사용하지 않습니다.
+    계약기간은 사용자 입력값 또는 상품 조건에서만 가져옵니다.
+    """
+    product_candidates = _load_product_candidates_for_financial(state)
+    if not product_candidates:
+        return result
+
+    user_query = str(state.get("user_query") or _last_user_text(state.get("messages") or ""))
+    monthly_amount = _extract_monthly_amount_from_query(user_query)
+    requested_term_months = _extract_term_months_from_query(user_query)
+
+    if monthly_amount is None:
+        monthly_amount = _extract_monthly_amount_from_customer_profile(state)
+
+    financial_results: list[dict[str, Any]] = []
+
+    for product in product_candidates:
+        if not isinstance(product, dict):
+            continue
+
+        product_name = str(product.get("product_name") or "").strip()
+        if not product_name:
+            continue
+
+        term_months = (
+            requested_term_months
+            or _to_int_or_none(product.get("max_period_months"))
+            or _to_int_or_none(product.get("min_period_months"))
+        )
+
+        applied_rate = (
+            _to_float_or_none(product.get("max_rate"))
+            or _to_float_or_none(product.get("base_rate"))
+        )
+
+        evidence = product.get("evidence") or []
+
+        if monthly_amount is None or term_months is None or applied_rate is None:
+            financial_results.append(
+                {
+                    "product_name": product_name,
+                    "status": "needs_check",
+                    "monthly_amount": monthly_amount,
+                    "term_months": term_months,
+                    "applied_rate": applied_rate,
+                    "estimated_interest": None,
+                    "maturity_amount": None,
+                    "reason": "월 납입액, 계약기간 또는 적용금리 정보가 부족해 계산을 확정하지 못했습니다.",
+                    "evidence": evidence,
+                    "source_agent": "financial_agent",
+                }
+            )
+            continue
+
+        calculation = _calculate_savings_projection(
+            monthly_amount=monthly_amount,
+            term_months=term_months,
+            annual_rate=applied_rate,
+        )
+
+        financial_results.append(
+            {
+                "product_name": product_name,
+                "status": "calculated",
+                "monthly_amount": monthly_amount,
+                "term_months": term_months,
+                "applied_rate": applied_rate,
+                "estimated_interest": calculation["after_tax_interest"],
+                "maturity_amount": calculation["maturity_amount"],
+                "total_principal": calculation["total_principal"],
+                "before_tax_interest": calculation["before_tax_interest"],
+                "tax": calculation["tax"],
+                "evidence": evidence,
+                "source_agent": "financial_agent",
+            }
+        )
+
+    if not financial_results:
+        return result
+
+    financial_result = result.get("financial_result")
+    if not isinstance(financial_result, dict):
+        return result
+
+    payload = financial_result.get("result", {})
+    if not isinstance(payload, dict):
+        payload = {}
+
+    payload["financial_results"] = financial_results
+    payload["summary"] = _build_recommendation_financial_summary(financial_results)
+
+    financial_result["result"] = payload
+    financial_result["evidence"] = financial_results
+    financial_result["status"] = "success"
+
+    result["financial_result"] = financial_result
+    result["financial_results"] = financial_results
+
+    agent_outputs = dict(result.get("agent_outputs") or {})
+    if isinstance(agent_outputs.get("financial_agent"), dict):
+        agent_outputs["financial_agent"] = financial_result
+    else:
+        agent_outputs["financial_agent"] = financial_result
+
+    result["agent_outputs"] = agent_outputs
+
+    return result
+
+
+def _load_product_candidates_for_financial(state: AgentState) -> list[dict]:
+    candidates = state.get("product_candidates")
+    if isinstance(candidates, list) and candidates:
+        return candidates
+
+    product_result = state.get("product_result") or {}
+    if isinstance(product_result, dict):
+        payload = product_result.get("result", {})
+        if isinstance(payload, dict):
+            candidates = payload.get("products") or payload.get("product_candidates")
+            if isinstance(candidates, list) and candidates:
+                return candidates
+
+    agent_outputs = state.get("agent_outputs") or {}
+    product_agent = agent_outputs.get("product_agent") or {}
+    if isinstance(product_agent, dict):
+        payload = product_agent.get("result", {})
+        if isinstance(payload, dict):
+            candidates = payload.get("products") or payload.get("product_candidates")
+            if isinstance(candidates, list) and candidates:
+                return candidates
+
+    return []
+
+
+def _extract_monthly_amount_from_query(user_query: str) -> int | None:
+    normalized = str(user_query or "").replace(",", "").replace(" ", "")
+
+    match = re.search(r"월([0-9]+)만원", normalized)
+    if match:
+        return int(match.group(1)) * 10000
+
+    match = re.search(r"월([0-9]+)원", normalized)
+    if match:
+        return int(match.group(1))
+
+    return None
+
+
+def _extract_term_months_from_query(user_query: str) -> int | None:
+    normalized = str(user_query or "").replace(",", "").replace(" ", "")
+
+    year_match = re.search(r"([0-9]{1,2})년", normalized)
+    if year_match:
+        return int(year_match.group(1)) * 12
+
+    month_match = re.search(r"([0-9]{1,2})개월", normalized)
+    if month_match:
+        return int(month_match.group(1))
+
+    return None
+
+
+def _extract_monthly_amount_from_customer_profile(state: AgentState) -> int | None:
+    profile = state.get("customer_profile") or {}
+
+    if isinstance(profile, dict):
+        amount = profile.get("monthly_saving_amount")
+        parsed = _to_int_or_none(amount)
+        if parsed is not None:
+            return parsed
+
+    eligibility_result = state.get("eligibility_result") or {}
+    if isinstance(eligibility_result, dict):
+        payload = eligibility_result.get("result", {})
+        if isinstance(payload, dict):
+            profile = payload.get("customer_profile") or {}
+            if isinstance(profile, dict):
+                return _to_int_or_none(profile.get("monthly_saving_amount"))
+
+    return None
+
+
+def _calculate_savings_projection(
+    monthly_amount: int,
+    term_months: int,
+    annual_rate: float,
+    tax_rate: float = DEFAULT_TAX_RATE,
+) -> dict[str, int]:
+    total_principal = monthly_amount * term_months
+
+    before_tax_interest = sum(
+        monthly_amount * (annual_rate / 100) * (term_months - payment_index) / 12
+        for payment_index in range(term_months)
+    )
+
+    tax = before_tax_interest * tax_rate
+    after_tax_interest = before_tax_interest - tax
+    maturity_amount = total_principal + after_tax_interest
+
+    return {
+        "total_principal": int(total_principal),
+        "before_tax_interest": int(before_tax_interest),
+        "tax": int(tax),
+        "after_tax_interest": int(after_tax_interest),
+        "maturity_amount": int(maturity_amount),
+    }
+
+
+def _build_recommendation_financial_summary(financial_results: list[dict[str, Any]]) -> str:
+    lines = [
+        "추천 후보 상품별 예상 만기금액 계산 결과입니다.",
+        "",
+        "| 상품명 | 상태 | 월 납입액 | 기간 | 적용금리 | 예상 세후 이자 | 만기 예상액 |",
+        "|---|---|---:|---:|---:|---:|---:|",
+    ]
+
+    for item in financial_results:
+        product_name = item.get("product_name", "-")
+        status = item.get("status", "-")
+        monthly_amount = item.get("monthly_amount")
+        term_months = item.get("term_months")
+        applied_rate = item.get("applied_rate")
+        estimated_interest = item.get("estimated_interest")
+        maturity_amount = item.get("maturity_amount")
+
+        lines.append(
+            "| {product_name} | {status} | {monthly} | {term} | {rate} | {interest} | {maturity} |".format(
+                product_name=product_name,
+                status=status,
+                monthly=f"{int(monthly_amount):,}원" if monthly_amount is not None else "-",
+                term=f"{int(term_months)}개월" if term_months is not None else "-",
+                rate=f"{float(applied_rate):.2f}%" if applied_rate is not None else "-",
+                interest=f"{int(estimated_interest):,}원" if estimated_interest is not None else "-",
+                maturity=f"{int(maturity_amount):,}원" if maturity_amount is not None else "-",
+            )
+        )
+
+    return "\n".join(lines)
+
+
+def _to_int_or_none(value: Any) -> int | None:
+    if value in (None, "", []):
+        return None
+
+    try:
+        return int(float(str(value).replace(",", "")))
+    except Exception:
+        return None
+
+
+def _to_float_or_none(value: Any) -> float | None:
+    if value in (None, "", []):
+        return None
+
+    try:
+        return float(str(value).replace(",", "").replace("%", ""))
+    except Exception:
+        return None

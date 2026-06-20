@@ -14,6 +14,22 @@ def parse_customer_profile(raw_profile: Any) -> dict:
     if isinstance(raw_profile, dict):
         profile = dict(raw_profile)
         profile["raw_text"] = json.dumps(raw_profile, ensure_ascii=False)
+
+        # DB 컬럼명과 eligibility 내부 필드명 매핑
+        if profile.get("income") in (None, "", 0):
+            profile["income"] = _to_int(
+                profile.get("annual_income")
+                or profile.get("yearly_income")
+                or profile.get("income")
+            )
+
+        if profile.get("monthly_saving_amount") in (None, "", 0):
+            profile["monthly_saving_amount"] = _to_int(
+                profile.get("available_monthly_saving")
+                or profile.get("monthly_saving_amount")
+                or profile.get("monthly_amount")
+            )
+
         profile["is_soldier"] = _infer_is_soldier(profile.get("job"), profile["raw_text"])
         return profile
 

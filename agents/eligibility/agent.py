@@ -61,6 +61,36 @@ def eligibility_agent_node(state: AgentState) -> dict:
             customer_accounts = _load_customer_accounts(state, customer_result, agent_outputs)
             product_candidates = _load_product_candidates(state, product_result, agent_outputs)
             user_constraints = _extract_user_constraints(state)
+            customer_profile = _merge_user_constraints_into_customer_profile(
+            customer_profile,
+            user_constraints,
+            )
+
+            def _merge_user_constraints_into_customer_profile(
+                customer_profile: dict[str, Any],
+                user_constraints: dict[str, Any],
+            ) -> dict[str, Any]:
+                """
+                사용자가 '월 30만원'처럼 직접 말한 금액은
+                customer_profile.monthly_saving_amount가 비어 있을 때 보조값으로 사용합니다.
+                단, transaction_months 같은 고객 거래개월 수는 계약기간으로 절대 사용하지 않습니다.
+                """
+                profile = dict(customer_profile or {})
+                parsed_fields = set(profile.get("parsed_customer_fields") or [])
+                parsed_values = dict(profile.get("parsed_customer_values") or {})
+
+                monthly_amount = user_constraints.get("monthly_amount")
+
+                if monthly_amount is not None and profile.get("monthly_saving_amount") in (None, "", 0):
+                    profile["monthly_saving_amount"] = monthly_amount
+                    parsed_fields.add("monthly_saving_amount")
+                    parsed_values["monthly_saving_amount"] = monthly_amount
+
+                profile["parsed_customer_fields"] = list(parsed_fields)
+                profile["parsed_customer_values"] = parsed_values
+
+                return profile
+            
             customer_profile_source = customer_profile.get("customer_profile_source", "missing")
             parsed_customer_fields = customer_profile.get("parsed_customer_fields", [])
             parsed_customer_values = customer_profile.get("parsed_customer_values", {})
@@ -489,16 +519,17 @@ def _normalize_eligibility_result(result: dict[str, Any]) -> dict[str, Any]:
 
 def _extract_user_constraints(state: AgentState) -> dict[str, Any]:
     """
-    사용자 발화에서 납입금액과 기간 같은 명시 조건을 추출한다.
+    사용자 발화에서 납입금액과 기간 같은 명시 조건만 추출합니다.
 
-    앞단 입력이 불완전하더라도 사용자가 직접 말한 조건이 있으면
-    잘못된 eligible 판정을 줄이는 데 도움이 된다.
+    주의:
+    - transaction_months는 고객 거래기간이므로 계약기간으로 쓰지 않습니다.
+    - 기간은 사용자가 '2년', '24개월'처럼 직접 말한 경우에만 추출합니다.
     """
-
     user_query = str(state.get("user_query") or _get_last_user_text(state.get("messages") or []))
     normalized = user_query.replace(",", "").replace(" ", "")
 
     monthly_amount = None
+
     amount_match = re.search(r"월([0-9]+)만원", normalized)
     if amount_match:
         monthly_amount = int(amount_match.group(1)) * 10000
@@ -508,9 +539,14 @@ def _extract_user_constraints(state: AgentState) -> dict[str, Any]:
             monthly_amount = int(amount_match.group(1))
 
     period_months = None
-    period_match = re.search(r"([0-9]{1,2})개월", normalized)
-    if period_match:
-        period_months = int(period_match.group(1))
+
+    year_match = re.search(r"([0-9]{1,2})년", normalized)
+    if year_match:
+        period_months = int(year_match.group(1)) * 12
+    else:
+        period_match = re.search(r"([0-9]{1,2})개월", normalized)
+        if period_match:
+            period_months = int(period_match.group(1))
 
     return {
         "monthly_amount": monthly_amount,
