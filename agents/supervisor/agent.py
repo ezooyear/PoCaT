@@ -95,7 +95,16 @@ def _plan_mode(state: AgentState) -> dict:
     user_query = state.get("user_query") or _get_last_user_text(state_messages)
     normalized_query = (user_query or "").lower().replace(" ", "")
 
-    # 1차: 규칙 기반 routing
+
+
+    # 디버깅
+    print("\n[SUPERVISOR DEBUG]")
+    print("state.user_query =", repr(state.get("user_query")))
+    print("messages =", repr(state_messages))
+    print("extracted user_query =", repr(user_query))
+    print("normalized_query =", repr(normalized_query))
+    print("[/SUPERVISOR DEBUG]\n")
+        # 1차: 규칙 기반 routing
     if (
         "추천" in normalized_query
         or "recommend" in normalized_query
@@ -844,11 +853,77 @@ def _format_agent_results(final_context: dict) -> str:
 
     return "\n".join(lines)
 
+def _build_recommendation_fallback_answer(final_context: dict) -> str | None:
+    """
+    Supervisor 최종 LLM 합성이 실패해도,
+    추천 결과와 validation 통과 결과가 있으면 추천 요약을 사용자에게 보여줍니다.
+    """
+    validation_result = final_context.get("validation_result") or {}
+    recommend_result = final_context.get("recommend_result") or {}
+
+    validation_status = ""
+    validation_payload = {}
+
+    if isinstance(validation_result, dict):
+        validation_status = str(validation_result.get("status") or "")
+        validation_payload = validation_result.get("result") or {}
+
+    is_valid = (
+        bool(validation_payload.get("is_valid"))
+        or validation_status in {"passed", "passed_with_warnings"}
+    )
+
+    if not is_valid:
+        return None
+
+    if not isinstance(recommend_result, dict):
+        return None
+
+    recommend_summary = str(recommend_result.get("summary") or "").strip()
+    recommend_payload = recommend_result.get("result") or {}
+
+    if not recommend_summary and isinstance(recommend_payload, dict):
+        recommend_summary = str(recommend_payload.get("summary") or "").strip()
+
+    if not recommend_summary:
+        return None
+
+    lines = [
+        "고객님의 가입 상품, 월 저축 가능액, 가입 가능 조건을 종합해 추천 결과를 정리했습니다.",
+        "",
+        recommend_summary,
+    ]
+
+    # validation warning 원문은 개발자용 문장이라 사용자에게 그대로 노출하지 않습니다.
+    # 일반 추천에서는 핵심 주의사항만 사용자 친화적으로 정리합니다.
+    if validation_status == "passed_with_warnings" or validation_payload.get("warnings"):
+        lines.append("")
+        lines.append("주의사항")
+        lines.append(
+            "- 현재 추천은 고객님의 직업, 월 저축 가능액, 가입 가능 조건을 기준으로 한 1차 추천입니다."
+        )
+        lines.append(
+            "- 예상 이자가 '-'로 표시된 상품은 희망 가입 기간과 실제 적용 금리가 확정되지 않아 수익 계산을 보류한 상태입니다."
+        )
+        lines.append(
+            "- 정확한 만기 금액과 이자는 월 납입액, 가입 기간, 우대금리 충족 여부를 정하면 다시 계산할 수 있습니다."
+        )
+
+    lines.append("")
+    lines.append(
+        "정확한 예상 이자와 만기 금액은 희망 가입 기간, 실제 납입액, 가입 시점의 적용 금리에 따라 달라질 수 있습니다."
+    )
+
+    return "\n".join(lines)
 
 def _fallback_final_answer(final_context: dict, error: Exception | None = None) -> str:
     """
     최종 답변 LLM 호출 실패 시 최소한의 답변을 생성한다.
     """
+
+    recommendation_answer = _build_recommendation_fallback_answer(final_context)
+    if recommendation_answer:
+        return recommendation_answer
 
     lines = [
         "요청하신 내용을 기준으로 확인한 결과를 정리해드릴게요.",

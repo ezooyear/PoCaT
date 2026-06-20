@@ -43,6 +43,28 @@ INVALID_PRODUCT_MARKERS = [
     "유의사항",
     "판매기간",
 ]
+def _merge_user_constraints_into_customer_profile(
+    customer_profile: dict[str, Any],
+    user_constraints: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    사용자가 '월 30만원'처럼 직접 말한 금액은
+    customer_profile.monthly_saving_amount가 비어 있을 때 보조값으로 사용합니다.
+    단, transaction_months 같은 고객 거래개월 수는 계약기간으로 절대 사용하지 않습니다.
+    """
+    profile = dict(customer_profile or {})
+    parsed_fields = set(profile.get("parsed_customer_fields") or [])
+    parsed_values = dict(profile.get("parsed_customer_values") or {})
+
+    monthly_amount = user_constraints.get("monthly_amount")
+    if monthly_amount is not None and profile.get("monthly_saving_amount") in (None, "", 0):
+        profile["monthly_saving_amount"] = monthly_amount
+        parsed_fields.add("monthly_saving_amount")
+        parsed_values["monthly_saving_amount"] = monthly_amount
+
+    profile["parsed_customer_fields"] = list(parsed_fields)
+    profile["parsed_customer_values"] = parsed_values
+    return profile
 
 
 def eligibility_agent_node(state: AgentState) -> dict:
@@ -62,34 +84,10 @@ def eligibility_agent_node(state: AgentState) -> dict:
             product_candidates = _load_product_candidates(state, product_result, agent_outputs)
             user_constraints = _extract_user_constraints(state)
             customer_profile = _merge_user_constraints_into_customer_profile(
-            customer_profile,
-            user_constraints,
+                customer_profile,
+                user_constraints,
             )
 
-            def _merge_user_constraints_into_customer_profile(
-                customer_profile: dict[str, Any],
-                user_constraints: dict[str, Any],
-            ) -> dict[str, Any]:
-                """
-                사용자가 '월 30만원'처럼 직접 말한 금액은
-                customer_profile.monthly_saving_amount가 비어 있을 때 보조값으로 사용합니다.
-                단, transaction_months 같은 고객 거래개월 수는 계약기간으로 절대 사용하지 않습니다.
-                """
-                profile = dict(customer_profile or {})
-                parsed_fields = set(profile.get("parsed_customer_fields") or [])
-                parsed_values = dict(profile.get("parsed_customer_values") or {})
-
-                monthly_amount = user_constraints.get("monthly_amount")
-
-                if monthly_amount is not None and profile.get("monthly_saving_amount") in (None, "", 0):
-                    profile["monthly_saving_amount"] = monthly_amount
-                    parsed_fields.add("monthly_saving_amount")
-                    parsed_values["monthly_saving_amount"] = monthly_amount
-
-                profile["parsed_customer_fields"] = list(parsed_fields)
-                profile["parsed_customer_values"] = parsed_values
-
-                return profile
             
             customer_profile_source = customer_profile.get("customer_profile_source", "missing")
             parsed_customer_fields = customer_profile.get("parsed_customer_fields", [])
@@ -905,23 +903,111 @@ def _validate_product_name(product_name: str) -> list[str]:
     return reasons
 
 
+def _normalize_amount_for_eligibility(value: Any) -> int | None:
+    """
+    가입 금액/월 납입 한도만 원 단위로 변환합니다.
+    금리, 퍼센트, 페이지 번호, 출처 번호처럼 금액이 아닌 숫자는 제외합니다.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        amount = int(value)
+        return amount if amount >= 1000 else None
+
+    text = str(value).replace(",", "").strip()
+    if not text:
+        return None
+
+    lowered = text.lower()
+
+    # 금리/이율/퍼센트는 금액 한도가 아님
+    if "%" in text or "금리" in text or "이율" in text or "우대" in text:
+        return None
+
+    # 출처/페이지 번호는 금액 한도가 아님
+    if "출처" in text or "page" in lowered or "p." in lowered:
+        return None
+
+    match = re.search(r"(\d+(?:\.\d+)?)\s*만원", text)
+    if match:
+        return int(float(match.group(1)) * 10000)
+
+    match = re.search(r"(\d+(?:\.\d+)?)\s*천원", text)
+    if match:
+        return int(float(match.group(1)) * 1000)
+
+    match = re.search(r"(\d+)\s*원", text)
+    if match:
+        amount = int(match.group(1))
+        return amount if amount >= 1000 else None
+
+    if text.isdigit():
+        amount = int(text)
+        return amount if amount >= 1000 else None
+
+    return None
+
+
+def _extract_amount_from_raw_text(raw_text: str, patterns: list[str]) -> int | None:
+    source = str(raw_text or "")
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, source):
+            value = match.group(1) if match.groups() else match.group(0)
+            amount = _normalize_amount_for_eligibility(value)
+            if amount is not None:
+                return amount
+
+    return None
+
+
 def _extract_amount_bounds(product: dict[str, Any]) -> tuple[int | None, int | None]:
-    min_amount = product.get("min_amount")
-    max_amount = product.get("max_amount")
+    """
+    상품의 최소/최대 납입 한도를 추출합니다.
+    product_agent는 min_monthly_amount/max_monthly_amount로 넘기기도 하므로
+    해당 키를 우선 확인합니다.
+    """
+    min_amount = (
+        _normalize_amount_for_eligibility(product.get("min_amount"))
+        or _normalize_amount_for_eligibility(product.get("min_monthly_amount"))
+        or _normalize_amount_for_eligibility(product.get("min_deposit_amount"))
+    )
+
+    max_amount = (
+        _normalize_amount_for_eligibility(product.get("max_amount"))
+        or _normalize_amount_for_eligibility(product.get("max_monthly_amount"))
+        or _normalize_amount_for_eligibility(product.get("max_deposit_amount"))
+    )
+
     raw_text = str(product.get("raw_text") or "")
 
     if min_amount is None:
-        min_match = re.search(r"(최소|최저).{0,10}?([0-9][0-9,]*)", raw_text)
-        if min_match:
-            min_amount = int(min_match.group(2).replace(",", ""))
+        min_amount = _extract_amount_from_raw_text(
+            raw_text,
+            [
+                r"(?:최소|최저).{0,30}?([0-9,]+(?:\.\d+)?\s*(?:만원|천원|원))",
+                r"([0-9,]+(?:\.\d+)?\s*(?:만원|천원|원))\s*이상",
+            ],
+        )
 
     if max_amount is None:
-        max_match = re.search(r"(최대|최고).{0,10}?([0-9][0-9,]*)", raw_text)
-        if max_match:
-            max_amount = int(max_match.group(2).replace(",", ""))
+        max_amount = _extract_amount_from_raw_text(
+            raw_text,
+            [
+                r"(?:최대|최고|납입한도|한도).{0,30}?([0-9,]+(?:\.\d+)?\s*(?:만원|천원|원))\s*이하",
+                r"(?:월|매월).{0,30}?([0-9,]+(?:\.\d+)?\s*(?:만원|천원|원))\s*이하",
+                r"([0-9,]+(?:\.\d+)?\s*(?:만원|천원|원))\s*이하",
+            ],
+        )
+
+    # 3원, 9원 같은 비정상 값은 금리/출처 숫자를 잘못 파싱한 것으로 보고 무시
+    if min_amount is not None and min_amount < 1000:
+        min_amount = None
+    if max_amount is not None and max_amount < 1000:
+        max_amount = None
 
     return min_amount, max_amount
-
 
 def _extract_period_bounds(product: dict[str, Any]) -> tuple[int | None, int | None]:
     raw_text = str(product.get("raw_text") or "")

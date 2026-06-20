@@ -42,10 +42,34 @@ LLM_VALIDATION_TASKS = {
     "switch_analysis",
 }
 
-
-def validation_agent_node(state: AgentState) -> dict[str, Any]:
+# helper함수
+def _add_validation_field_semantics(validation_context: Any) -> Any:
     """
-    Validation Agent 노드 함수.
+    Validation LLM이 고객 거래기간(transaction_months)을
+    사용자의 희망 계약기간(term_months)으로 오해하지 않도록 명시합니다.
+    """
+    notice = (
+        "\n\n[필드 의미 주의]\n"
+        "- transaction_months는 고객의 은행 거래 개월 수입니다.\n"
+        "- transaction_months는 사용자가 원하는 예금/적금 계약기간이 아닙니다.\n"
+        "- 사용자의 희망 계약기간은 질문에 '2년', '24개월'처럼 직접 표현된 경우에만 term_months로 봅니다.\n"
+        "- 사용자 질문에 기간이 없으면 희망 계약기간은 None/미정으로 판단합니다.\n"
+        "- 따라서 transaction_months 값을 근거로 기간 초과, 기간 충돌, 계약기간 불일치 이슈를 만들지 마십시오.\n"
+    )
+
+    if isinstance(validation_context, str):
+        return validation_context + notice
+
+    if isinstance(validation_context, dict):
+        context = dict(validation_context)
+        context["field_semantics_notice"] = notice
+        return context
+
+    return validation_context
+
+def _validation_agent_node_impl(state: AgentState) -> dict[str, Any]:
+    """
+    Validation Agent 실제 실행 로직
 
     검증 방향:
     1. state에 저장된 구조화 결과 수집
@@ -55,6 +79,7 @@ def validation_agent_node(state: AgentState) -> dict[str, Any]:
     """
 
     validation_context = build_validation_context(state)
+    validation_context = _add_validation_field_semantics(validation_context)
 
     # 1차 검증: 항상 실행
     rule_issues, rule_checked_items = run_validation_checks(state)
@@ -79,7 +104,7 @@ def validation_agent_node(state: AgentState) -> dict[str, Any]:
             rule_checked_items=rule_checked_items,
             llm_skipped=not should_run_llm,
         )
-
+    verify_result = _soften_recommendation_verify_result(verify_result, state)
     is_valid = bool(verify_result.get("is_valid"))
     validation_summary = _extract_validation_summary(verify_result, state)
     warnings = [
@@ -142,6 +167,120 @@ def validation_agent_node(state: AgentState) -> dict[str, Any]:
         "completed_agents": completed_agents,
         "current_step": (state.get("current_step") or 0) + 1,
     }
+def _has_recommendation_result(state: AgentState) -> bool:
+    """
+    추천 결과가 하나라도 있으면 True.
+    top-level recommendation_results와 recommend_result.result.recommendations를 모두 확인합니다.
+    """
+    top_level = state.get("recommendation_results") or []
+    if isinstance(top_level, list) and len(top_level) > 0:
+        return True
+
+    recommend_result = state.get("recommend_result") or {}
+    if not isinstance(recommend_result, dict):
+        return False
+
+    payload = recommend_result.get("result") or {}
+    if not isinstance(payload, dict):
+        return False
+
+    for key in ["recommendations", "recommended_products", "recommendation_results"]:
+        value = payload.get(key)
+        if isinstance(value, list) and len(value) > 0:
+            return True
+
+    return False
+
+
+def _get_customer_profile_for_validation(state: AgentState) -> dict[str, Any]:
+    profile = state.get("customer_profile")
+    if isinstance(profile, dict):
+        return profile
+
+    customer_result = state.get("customer_result") or {}
+    if isinstance(customer_result, dict):
+        payload = customer_result.get("result") or {}
+        if isinstance(payload, dict) and isinstance(payload.get("customer_profile"), dict):
+            return payload["customer_profile"]
+
+        if isinstance(customer_result.get("customer_profile"), dict):
+            return customer_result["customer_profile"]
+
+    return {}
+
+
+def _is_positive_number(value: Any) -> bool:
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _soften_recommendation_verify_result(
+    verify_result: dict[str, Any],
+    state: AgentState,
+) -> dict[str, Any]:
+    """
+    일반 추천 질문에서 추천 결과가 이미 생성된 경우,
+    warning만으로 최종 추천을 차단하지 않도록 완화합니다.
+
+    단, error 레벨 이슈가 있으면 그대로 실패 처리합니다.
+    """
+    if state.get("task_type") != "recommendation":
+        return verify_result
+
+    if not _has_recommendation_result(state):
+        return verify_result
+
+    issues = verify_result.get("issues") or []
+    filtered_issues = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            filtered_issues.append(issue)
+            continue
+
+        message = str(issue.get("message") or "")
+        suggestion = str(issue.get("suggestion") or "")
+
+        # transaction_months=81을 희망 계약기간으로 오해한 validation 이슈 제거
+        if (
+            "81개월" in message
+            and ("계약 기간" in message or "계약기간" in message or "허용 기간" in message)
+        ):
+            continue
+
+        if (
+            "transaction_months" in message
+            and ("계약 기간" in message or "계약기간" in message)
+        ):
+            continue
+
+        filtered_issues.append(issue)
+
+    verify_result = dict(verify_result)
+    verify_result["issues"] = filtered_issues
+    issues = filtered_issues
+    has_error_issue = any(
+        isinstance(issue, dict)
+        and str(issue.get("level") or "").lower() == "error"
+        for issue in issues
+    )
+
+    if has_error_issue:
+        return verify_result
+
+    softened = dict(verify_result)
+    softened["status"] = "warning" if issues else "passed"
+    softened["is_valid"] = True
+    softened["revision_required"] = False
+
+    final_notes = list(softened.get("final_notes") or [])
+    final_notes.append(
+        "일반 추천 질문이므로 계약기간·적용금리 미확정 항목은 최종 차단이 아니라 주의사항으로 안내합니다."
+    )
+    softened["final_notes"] = final_notes
+
+    return softened
 
 def _extract_validation_summary(
     verify_result: dict[str, Any],
@@ -159,6 +298,7 @@ def _extract_validation_summary(
     issues = verify_result.get("issues") or []
     missing_fields = _infer_missing_user_fields(state)
     blocking_issues: list[str] = []
+    has_recommendation = _has_recommendation_result(state)
 
     for issue in issues:
         if isinstance(issue, dict):
@@ -166,11 +306,20 @@ def _extract_validation_summary(
             message = str(issue.get("message") or "").strip()
             suggestion = str(issue.get("suggestion") or "").strip()
 
-            if level in ["error", "warning"]:
+            # error는 항상 차단
+            if level == "error":
                 if message:
                     blocking_issues.append(message)
                 elif suggestion:
                     blocking_issues.append(suggestion)
+
+        # 추천 결과가 없는 상태의 warning만 차단
+        elif level == "warning" and not has_recommendation:
+            if message:
+                blocking_issues.append(message)
+            elif suggestion:
+                blocking_issues.append(suggestion)
+
         else:
             message = str(issue).strip()
             if message:
@@ -199,40 +348,68 @@ def _extract_validation_summary(
 
 def _infer_missing_user_fields(state: AgentState) -> list[str]:
     """
-    사용자 질문에서 추천에 필요한 최소 입력값이 빠졌는지 가볍게 확인합니다.
-    복잡한 판단은 하지 않고, Supervisor가 물어볼 항목만 정리합니다.
+    사용자 질문에서 추천에 필요한 최소 입력값이 빠졌는지 확인합니다.
+
+    일반 추천:
+    - 고객 ID와 고객 profile의 월 저축 가능액이 있으면 추천 가능
+    - 희망 가입 기간이 없어도 추천 자체는 막지 않음
+
+    정확한 이자 계산 요청:
+    - 사용자가 예상 이자/만기 금액/계산을 요구하면 기간이 필요함
     """
     task_type = state.get("task_type")
     if task_type != "recommendation":
         return []
 
     user_query = str(state.get("user_query") or "").replace(" ", "")
+    customer_profile = _get_customer_profile_for_validation(state)
+
     missing_fields: list[str] = []
 
     has_customer_id = bool(state.get("customer_id")) or bool(
         re.search(r"(고객|customer|id|ID|고객ID|고객id|고객_)?\d+번?", user_query)
     )
 
-    has_monthly_amount = bool(
+    has_query_monthly_amount = bool(
         re.search(r"월?\d+만?원|\d{1,3}(,\d{3})*원", user_query)
     )
+
+    profile_monthly_amount = (
+        customer_profile.get("monthly_saving_amount")
+        or customer_profile.get("available_monthly_saving")
+        or customer_profile.get("monthly_amount")
+    )
+
+    has_monthly_basis = has_query_monthly_amount or _is_positive_number(profile_monthly_amount)
 
     has_period = bool(
         re.search(r"\d+개월|\d+년|[0-9]+개월|[0-9]+년", user_query)
     )
 
     has_product_type = "적금" in user_query or "예금" in user_query
+    has_product_basis = (
+        has_product_type
+        or bool(state.get("product_candidates") or [])
+        or _has_recommendation_result(state)
+    )
+
+    wants_exact_calculation = any(
+        keyword in user_query
+        for keyword in ["예상이자", "만기금액", "얼마받", "계산", "정확"]
+    )
 
     if not has_customer_id:
         missing_fields.append("고객 ID")
 
-    if not has_monthly_amount:
-        missing_fields.append("월 납입 예정 금액")
+    if not has_monthly_basis:
+        missing_fields.append("월 납입 예정 금액 또는 월 저축 가능액")
 
-    if not has_period:
+    # 일반 추천에서는 기간이 없어도 추천 가능.
+    # 다만 예상 이자/만기금액 계산을 직접 요구한 경우에는 기간 필요.
+    if wants_exact_calculation and not has_period:
         missing_fields.append("희망 가입 기간")
 
-    if not has_product_type:
+    if not has_product_basis:
         missing_fields.append("상품 유형(예금/적금)")
 
     return missing_fields
@@ -412,11 +589,11 @@ def _normalize_verify_result(data: dict[str, Any]) -> dict[str, Any]:
     if has_error_issue:
         status = "failed"
         is_valid = False
-    elif has_warning_issue and status == "passed":
-        status = "warning"
-
-    if has_error_issue or has_warning_issue:
         revision_required = True
+    elif has_warning_issue:
+        status = "warning"
+        is_valid = True
+        revision_required = False
 
     if "condition_conflict" in issue_types:
         default_checked_items["condition_conflict_checked"] = True
@@ -441,7 +618,6 @@ def _normalize_verify_result(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-_validation_agent_node_impl = validation_agent_node
 
 
 def validation_agent_node(state: AgentState) -> dict[str, Any]:

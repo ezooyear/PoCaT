@@ -637,6 +637,71 @@ def _looks_like_missing_info_summary(summary: str) -> bool:
     ]
     return any(marker in str(summary or "") for marker in missing_markers)
 
+# helper
+def _load_eligibility_status_by_product(state: AgentState) -> dict[str, dict[str, Any]]:
+    """eligibility_agent 결과를 상품명 기준으로 조회할 수 있게 만듭니다."""
+    results = state.get("eligibility_results") or []
+
+    if not results:
+        eligibility_result = state.get("eligibility_result") or {}
+        payload = eligibility_result.get("result") if isinstance(eligibility_result, dict) else {}
+        if isinstance(payload, dict):
+            results = payload.get("results") or []
+
+    mapping: dict[str, dict[str, Any]] = {}
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("product_name") or "").strip()
+        if name:
+            mapping[name] = item
+
+    return mapping
+
+
+def _select_rate_for_term(product: dict[str, Any], term_months: int | None) -> float | None:
+    """
+    추천 계산에 사용할 금리를 선택합니다.
+    기간별 금리가 문서에 있으면 term_months에 맞는 금리를 우선 사용합니다.
+    없으면 기존 max_rate/base_rate를 fallback으로 사용합니다.
+    """
+    if term_months is None:
+        return None
+
+    raw_text = str(product.get("raw_text") or "")
+    product_name = str(product.get("product_name") or "")
+
+    # KB나라사랑적금: 1년제/2년제/3년제 최종이율 표에서 기간별 최고금리 추출
+    if "나라사랑" in product_name:
+        section = raw_text
+        if "최종이율" in section:
+            section = section.split("최종이율", 1)[1]
+
+        rates = [float(x) for x in re.findall(r"최고\s*연\s*([0-9]+(?:\.[0-9]+)?)\s*%", section)]
+        if len(rates) >= 3:
+            term_rate_map = {
+                12: rates[0],
+                24: rates[1],
+                36: rates[2],
+            }
+            if term_months in term_rate_map:
+                return term_rate_map[term_months]
+
+    # 장병내일준비적금: 기간 구간별 최종 최고금리 추출
+    if "장병내일" in product_name:
+        rates = [float(x) for x in re.findall(r"최고\s*연\s*([0-9]+(?:\.[0-9]+)?)\s*%", raw_text)]
+        if len(rates) >= 3:
+            if term_months < 12:
+                return rates[0]
+            if term_months < 15:
+                return rates[1]
+            if term_months <= 24:
+                return rates[2]
+
+    return (
+        _to_float_or_none(product.get("max_rate"))
+        or _to_float_or_none(product.get("base_rate"))
+    )
 
 def _augment_recommendation_financial_results(state: AgentState, result: dict) -> dict:
     """
@@ -644,6 +709,7 @@ def _augment_recommendation_financial_results(state: AgentState, result: dict) -
 
     transaction_months는 고객 거래개월 수이므로 계약기간으로 사용하지 않습니다.
     계약기간은 사용자 입력값 또는 상품 조건에서만 가져옵니다.
+    eligibility_agent에서 rejected/needs_check로 판단한 상품은 계산하지 않습니다.
     """
     product_candidates = _load_product_candidates_for_financial(state)
     if not product_candidates:
@@ -656,6 +722,7 @@ def _augment_recommendation_financial_results(state: AgentState, result: dict) -
     if monthly_amount is None:
         monthly_amount = _extract_monthly_amount_from_customer_profile(state)
 
+    eligibility_by_name = _load_eligibility_status_by_product(state)
     financial_results: list[dict[str, Any]] = []
 
     for product in product_candidates:
@@ -666,18 +733,37 @@ def _augment_recommendation_financial_results(state: AgentState, result: dict) -
         if not product_name:
             continue
 
+        evidence = product.get("evidence") or []
+
+        eligibility_item = eligibility_by_name.get(product_name)
+        if isinstance(eligibility_item, dict):
+            eligibility_status = eligibility_item.get("status")
+            is_eligible = eligibility_item.get("eligible") is True
+
+            if not is_eligible or eligibility_status != "eligible":
+                financial_results.append(
+                    {
+                        "product_name": product_name,
+                        "status": "needs_check",
+                        "monthly_amount": monthly_amount,
+                        "term_months": requested_term_months,
+                        "applied_rate": None,
+                        "estimated_interest": None,
+                        "maturity_amount": None,
+                        "reason": f"eligibility_agent에서 {eligibility_status}로 판단되어 금융 계산을 보류했습니다.",
+                        "evidence": evidence,
+                        "source_agent": "financial_agent",
+                    }
+                )
+                continue
+
         term_months = (
             requested_term_months
             or _to_int_or_none(product.get("max_period_months"))
             or _to_int_or_none(product.get("min_period_months"))
         )
 
-        applied_rate = (
-            _to_float_or_none(product.get("max_rate"))
-            or _to_float_or_none(product.get("base_rate"))
-        )
-
-        evidence = product.get("evidence") or []
+        applied_rate = _select_rate_for_term(product, term_months)
 
         if monthly_amount is None or term_months is None or applied_rate is None:
             financial_results.append(
@@ -730,26 +816,35 @@ def _augment_recommendation_financial_results(state: AgentState, result: dict) -
     if not isinstance(payload, dict):
         payload = {}
 
+    calculated_results = [
+        item for item in financial_results
+        if item.get("status") == "calculated"
+    ]
+
     payload["financial_results"] = financial_results
+    payload["calculations"] = calculated_results
     payload["summary"] = _build_recommendation_financial_summary(financial_results)
+
+    if calculated_results:
+        payload["missing_fields"] = []
+        payload["fallback_reason"] = None
+        financial_result["status"] = "success"
+    else:
+        payload["missing_fields"] = payload.get("missing_fields") or ["term_months", "applied_rate"]
+        payload["fallback_reason"] = payload.get("fallback_reason") or "no_calculated_financial_results"
+        financial_result["status"] = "needs_check"
 
     financial_result["result"] = payload
     financial_result["evidence"] = financial_results
-    financial_result["status"] = "success"
 
     result["financial_result"] = financial_result
     result["financial_results"] = financial_results
 
     agent_outputs = dict(result.get("agent_outputs") or {})
-    if isinstance(agent_outputs.get("financial_agent"), dict):
-        agent_outputs["financial_agent"] = financial_result
-    else:
-        agent_outputs["financial_agent"] = financial_result
-
+    agent_outputs["financial_agent"] = financial_result
     result["agent_outputs"] = agent_outputs
 
     return result
-
 
 def _load_product_candidates_for_financial(state: AgentState) -> list[dict]:
     candidates = state.get("product_candidates")

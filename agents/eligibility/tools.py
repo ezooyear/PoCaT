@@ -2,6 +2,7 @@
 Eligibility Agent 도구
 - 다른 Agent가 모아둔 고객/상품 정보를 비교해 자격 판단에 필요한 값을 만듭니다.
 """
+from itertools import product
 import json
 import re
 from typing import Any
@@ -43,6 +44,8 @@ def parse_customer_profile(raw_profile: Any) -> dict:
         return {
             "age": _extract_age_from_birth_date(table_row.get("birth_date")),
             "job": job,
+            "income": _to_int(table_row.get("annual_income") or table_row.get("income")),
+            "annual_income": _to_int(table_row.get("annual_income")),
             "monthly_saving_amount": _to_int(table_row.get("available_monthly_saving")),
             "salary_transfer": _to_bool(table_row.get("salary_transfer_yn")),
             "auto_transfer": _to_bool(table_row.get("auto_transfer_yn")),
@@ -149,20 +152,24 @@ def _build_product_candidate(text: str) -> dict:
                 r"가입\s*가능\s*연령[:\s]*([0-9]{1,2})세\s*이하",
             ],
         ),
-        "min_amount": _extract_int(
+        "min_amount": _extract_amount(
             text,
             [
-                r"최소\s*가입\s*금액[:\s]*([0-9,]+)",
-                r"최저\s*금액[:\s]*([0-9,]+)",
-                r"월\s*최소\s*납입[:\s]*([0-9,]+)",
+                r"최소\s*가입\s*금액[:\s]*([0-9,]+(?:\.\d+)?\s*(?:만원|천원|원))",
+                r"최저\s*금액[:\s]*([0-9,]+(?:\.\d+)?\s*(?:만원|천원|원))",
+                r"월\s*최소\s*납입[:\s]*([0-9,]+(?:\.\d+)?\s*(?:만원|천원|원))",
+                r"([0-9,]+(?:\.\d+)?\s*(?:만원|천원|원))\s*이상",
             ],
         ),
-        "max_amount": _extract_int(
+        "max_amount": _extract_amount(
             text,
             [
-                r"최대\s*가입\s*금액[:\s]*([0-9,]+)",
-                r"최고\s*금액[:\s]*([0-9,]+)",
-                r"월\s*최대\s*납입[:\s]*([0-9,]+)",
+                r"최대\s*가입\s*금액[:\s]*([0-9,]+(?:\.\d+)?\s*(?:만원|천원|원))",
+                r"최고\s*금액[:\s]*([0-9,]+(?:\.\d+)?\s*(?:만원|천원|원))",
+                r"월\s*최대\s*납입[:\s]*([0-9,]+(?:\.\d+)?\s*(?:만원|천원|원))",
+                r"매월.*?([0-9,]+(?:\.\d+)?\s*만원)\s*이하",
+                r"월.*?([0-9,]+(?:\.\d+)?\s*만원)\s*이하",
+                r"([0-9,]+(?:\.\d+)?\s*(?:만원|천원|원))\s*이하",
             ],
         ),
         "sale_closed": any(keyword in lowered for keyword in ["판매 종료", "판매종료", "판매 중단", "신규 불가"]),
@@ -204,8 +211,15 @@ def evaluate_product_eligibility(customer_profile: dict, customer_accounts: list
             if max_age is not None and age > max_age:
                 reasons.append(f"연령 제한 미충족: 최대 {max_age}세 이하 필요")
 
-    min_amount = product.get("min_amount")
-    max_amount = product.get("max_amount")
+    min_amount = _normalize_krw_amount(product.get("min_amount"))
+    max_amount = _normalize_krw_amount(product.get("max_amount"))
+
+    # 5원, 9원처럼 비정상적으로 작은 값은 금리/출처 번호를 잘못 파싱한 것으로 보고 무시
+    if min_amount is not None and min_amount < 1000:
+        min_amount = None
+    if max_amount is not None and max_amount < 1000:
+        max_amount = None
+
     if min_amount is not None or max_amount is not None:
         if monthly_saving_amount is None:
             check_required.append("고객 월 가용 저축액")
@@ -369,6 +383,69 @@ def _extract_int(text: str, patterns: list[str]) -> int | None:
                 return int(digits)
     return None
 
+def _normalize_krw_amount(value: Any) -> int | None:
+    """
+    금액 표현을 원 단위 정수로 변환합니다.
+    금리(%), 페이지 번호, 출처 번호처럼 금액이 아닌 숫자는 제외합니다.
+    """
+    if value is None:
+        return None
+
+    text = str(value).replace(",", "").strip()
+    if not text:
+        return None
+
+    # 금리/이율/퍼센트는 금액이 아님
+    if "%" in text or "금리" in text or "이율" in text:
+        return None
+
+    # 출처/페이지 번호는 금액이 아님
+    lowered = text.lower()
+    if "출처" in text or "p." in lowered or "page" in lowered:
+        return None
+
+    # 50만원, 30 만원
+    match = re.search(r"(\d+(?:\.\d+)?)\s*만원", text)
+    if match:
+        return int(float(match.group(1)) * 10000)
+
+    # 1천원, 10 천원
+    match = re.search(r"(\d+(?:\.\d+)?)\s*천원", text)
+    if match:
+        return int(float(match.group(1)) * 1000)
+
+    # 300000원
+    match = re.search(r"(\d+)\s*원", text)
+    if match:
+        amount = int(match.group(1))
+        return amount if amount >= 1000 else None
+
+    # 숫자만 들어온 경우: 5, 9 같은 값은 상품 한도로 보지 않음
+    if text.isdigit():
+        amount = int(text)
+        return amount if amount >= 1000 else None
+
+    return None
+
+
+def _extract_amount(text: str, patterns: list[str]) -> int | None:
+    """
+    상품 설명 텍스트에서 금액 표현만 추출합니다.
+    """
+    source = str(text or "")
+
+    for pattern in patterns:
+        match = re.search(pattern, source)
+        if not match:
+            continue
+
+        value = match.group(1) if match.groups() else match.group(0)
+        amount = _normalize_krw_amount(value)
+        if amount is not None:
+            return amount
+
+    return None
+
 
 def _extract_text(text: str, patterns: list[str]) -> str | None:
     for pattern in patterns:
@@ -399,24 +476,45 @@ def _parse_first_table_row(text: str) -> dict[str, str]:
     lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
     header = None
 
-    for index, line in enumerate(lines):
+    header_markers = {
+        "customer_name",
+        "birth_date",
+        "customer_job",
+        "annual_income",
+        "income_level",
+        "available_monthly_saving",
+    }
+
+    for line in lines:
         if "|" not in line:
             continue
 
         parts = [part.strip() for part in line.split("|")]
 
-        if header is None and "customer_id" in line.lower():
+        # 구분선 스킵: ----- 또는 ----|---- 형태
+        compact = line.replace("|", "").replace("-", "").strip()
+        if not compact:
+            continue
+
+        lowered_parts = {part.lower() for part in parts}
+
+        # customer_id가 없어도 고객 프로필 표 헤더로 인식
+        if header is None and len(lowered_parts & header_markers) >= 2:
             header = parts
             continue
 
         if header is not None:
-            if set(line) == {"-"}:
-                continue
-            if len(parts) == len(header):
-                return dict(zip(header, parts))
+            row = parts
+
+            # 컬럼 수가 약간 어긋나도 최대한 맞춰서 파싱
+            if len(row) < len(header):
+                row = row + [""] * (len(header) - len(row))
+            elif len(row) > len(header):
+                row = row[:len(header)]
+
+            return dict(zip(header, row))
 
     return {}
-
 
 def _to_bool(value: Any) -> bool:
     text = str(value or "").strip().lower()
