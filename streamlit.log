@@ -1,0 +1,73 @@
+
+  You can now view your Streamlit app in your browser.
+
+  Local URL: http://localhost:8501
+  Network URL: http://10.10.30.15:8501
+
++------------------------- Traceback (most recent call last) --------------------------+
+| C:\Users\ghfjg\AppData\Local\Programs\Python\Python314\Lib\site-packages\streamlit\r |
+| untime\scriptrunner\exec_code.py:129 in exec_func_with_error_handling                |
+|                                                                                      |
+| C:\Users\ghfjg\AppData\Local\Programs\Python\Python314\Lib\site-packages\streamlit\r |
+| untime\scriptrunner\script_runner.py:789 in code_to_exec                             |
+|                                                                                      |
+| D:\OneDrive\6. 기타\문서\GitHub\PoCaT\app.py:16 in <module>                          |
+|                                                                                      |
+|     13 load_dotenv()                                                                 |
+|     14                                                                               |
+|     15 from db.postgres_db import get_connection                                     |
+| >   16 from graph.builder import build_graph                                         |
+|     17 from observability.langfuse import (                                          |
+|     18     flush_langfuse,                                                           |
+|     19     langfuse_observation,                                                     |
+|                                                                                      |
+| D:\OneDrive\6. 기타\문서\GitHub\PoCaT\graph\builder.py:12 in <module>                |
+|                                                                                      |
+|     9                                                                                |
+|    10 # 실제 프로젝트 구조에 맞게 import 경로는 조정 필요                            |
+|    11 from agents.supervisor import supervisor_node                                  |
+| >  12 from agents.customer import customer_agent_node                                |
+|    13 from agents.product import product_agent_node                                  |
+|    14 from agents.eligibility import eligibility_agent_node                          |
+|    15 from agents.financial import financial_agent_node                              |
+|                                                                                      |
+| D:\OneDrive\6. 기타\문서\GitHub\PoCaT\agents\customer\__init__.py:2 in <module>      |
+|                                                                                      |
+|   1 """agents.customer 패키지"""                                                     |
+| > 2 from agents.customer.agent import customer_agent_node                            |
+|   3                                                                                  |
+|   4 __all__ = ["customer_agent_node"]                                                |
+|   5                                                                                  |
+|                                                                                      |
+| D:\OneDrive\6. 기타\문서\GitHub\PoCaT\agents\customer\agent.py:18 in <module>        |
+|                                                                                      |
+|    15     run_agent_loop,                                                            |
+|    16 )                                                                              |
+|    17 from agents.customer.prompts import CUSTOMER_SYSTEM_PROMPT                     |
+| >  18 from agents.customer.tools import CUSTOMER_TOOLS                               |
+|    19 from agents.eligibility.tools import parse_customer_profile                    |
+|    20 from observability.langfuse import flush_langfuse, langfuse_observation, updat |
+|    21                                                                                |
+|                                                                                      |
+| D:\OneDrive\6. 기타\문서\GitHub\PoCaT\agents\customer\tools.py:15 in <module>        |
+|                                                                                      |
+|    12 import os                                                                      |
+|    13                                                                                |
+|    14 from db.postgres_db import DB_SCHEMA, execute_query                            |
+| >  15 from mcp_servers.postgres_mcp_client import call_postgres_mcp_tool             |
+|    16 from config.settings import get_llm                                            |
+|    17                                                                                |
+|    18                                                                                |
+|                                                                                      |
+| D:\OneDrive\6. 기타\문서\GitHub\PoCaT\mcp_servers\postgres_mcp_client.py:13 in       |
+| <module>                                                                             |
+|                                                                                      |
+|   10 from typing import Any                                                          |
+|   11                                                                                 |
+|   12 from dotenv import load_dotenv                                                  |
+| > 13 from mcp import ClientSession, types                                            |
+|   14 from mcp.client.streamable_http import streamable_http_client                   |
+|   15                                                                                 |
+|   16                                                                                 |
++--------------------------------------------------------------------------------------+
+ModuleNotFoundError: No module named 'mcp'
