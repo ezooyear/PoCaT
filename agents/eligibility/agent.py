@@ -9,7 +9,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
-from agents.base import make_agent_result
+from agents.base import make_agent_result, mirror_result_fields
 from agents.eligibility.prompts import ELIGIBILITY_SYSTEM_PROMPT
 from agents.eligibility.tools import (
     _extract_age_from_birth_date,
@@ -214,6 +214,23 @@ def eligibility_agent_node(state: AgentState) -> dict:
                 evidence=results,
                 error=None,
             )
+            eligibility_result = mirror_result_fields(
+                eligibility_result,
+                field_names=[
+                    "results",
+                    "eligible_products",
+                    "needs_check_products",
+                    "rejected_products",
+                    "invalid_products",
+                    "fallback_reason",
+                    "missing_fields",
+                    "invalid_fields",
+                    "customer_profile",
+                    "customer_profile_source",
+                    "parsed_customer_fields",
+                    "parsed_customer_values",
+                ],
+            )
             agent_outputs["eligibility_agent"] = eligibility_result
 
             update_observation(
@@ -255,6 +272,9 @@ def eligibility_agent_node(state: AgentState) -> dict:
                 metadata={
                     "agent": "eligibility_agent",
                     "status": overall_status,
+                    "result_key": "eligibility_result",
+                    "input_sources": f"customer_profile:{customer_profile_source};product_candidates:{product_candidate_source}",
+                    "output_keys": "results,eligible_products,needs_check_products,rejected_products,invalid_products",
                     "fallback_reason": fallback_reason,
                     "missing_fields": ",".join(missing_fields[:10]) if missing_fields else None,
                     "invalid_fields": ",".join(invalid_fields[:10]) if invalid_fields else None,
@@ -1258,6 +1278,20 @@ def _build_eligibility_exception_fallback(state: AgentState, error_message: str)
         },
         evidence=[],
         error=error_message,
+    )
+    fallback_result = mirror_result_fields(
+        fallback_result,
+        field_names=[
+            "results",
+            "eligible_products",
+            "needs_check_products",
+            "rejected_products",
+            "invalid_products",
+            "fallback_reason",
+            "missing_fields",
+            "invalid_fields",
+            "customer_profile",
+        ],
     )
 
     agent_outputs = dict(state.get("agent_outputs") or {})

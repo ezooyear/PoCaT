@@ -22,7 +22,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from config.settings import get_llm
 from graph import state
 from graph.state import AgentState
-from agents.base import build_agent_trace_input, build_agent_trace_output, make_agent_result
+from agents.base import build_agent_trace_input, build_agent_trace_output, make_agent_result, mirror_result_fields
 from agents.validation.prompts import VALIDATION_SYSTEM_PROMPT
 from agents.validation.tools import (
     build_validation_context,
@@ -92,8 +92,15 @@ def validation_agent_node(state: AgentState) -> dict[str, Any]:
         status="success" if is_valid else "failed",
         result={
             "verify_result": verify_result,
+            "status": "passed_with_warnings" if is_valid and verify_result.get("status") == "warning" else ("passed" if is_valid else "failed"),
             "is_valid": is_valid,
             "issues": verify_result.get("issues", []),
+            "failure_reasons": validation_summary["blocking_issues"],
+            "warnings": [
+                issue.get("message")
+                for issue in verify_result.get("issues", [])
+                if isinstance(issue, dict) and str(issue.get("level")).lower() == "warning" and issue.get("message")
+            ],
             "revision_required": validation_summary["revision_required"],
 
             # 추가: Supervisor final이 바로 읽을 수 있는 구조화 필드
@@ -103,11 +110,30 @@ def validation_agent_node(state: AgentState) -> dict[str, Any]:
             "awaiting_user_input": validation_summary["awaiting_user_input"],
 
             "checked_items": verify_result.get("checked_items", rule_checked_items),
+            "checks": verify_result.get("checked_items", rule_checked_items),
             "summary": verify_result.get("summary"),
             "final_notes": verify_result.get("final_notes", []),
         },
         evidence=[],
         error=None if is_valid else "검증 이슈가 발견되었습니다.",
+    )
+    validation_result = mirror_result_fields(
+        validation_result,
+        field_names=[
+            "verify_result",
+            "is_valid",
+            "issues",
+            "failure_reasons",
+            "warnings",
+            "revision_required",
+            "failure_type",
+            "missing_fields",
+            "blocking_issues",
+            "awaiting_user_input",
+            "checked_items",
+            "checks",
+            "final_notes",
+        ],
     )
 
     agent_outputs = dict(state.get("agent_outputs") or {})
@@ -472,6 +498,9 @@ def validation_agent_node(state: AgentState) -> dict[str, Any]:
                 metadata={
                     "agent": "validation_agent",
                     "status": validation_result.get("status") if isinstance(validation_result, dict) else None,
+                    "result_key": "validation_result",
+                    "input_sources": "customer_result;product_result;eligibility_result;financial_result;recommend_result",
+                    "output_keys": "is_valid,failure_reasons,warnings,checks",
                     "failure_type": result.get("failure_type"),
                 },
             )

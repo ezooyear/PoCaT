@@ -217,6 +217,10 @@ def product_agent_node(state: AgentState) -> dict[str, Any]:
                 metadata={
                     "agent": "product_agent",
                     "status": product_result.get("status") if isinstance(product_result, dict) else None,
+                    "result_key": "product_result",
+                    "input_sources": "tool_results",
+                    "output_keys": "products,product_candidates,structured_product_count,structured_product_names",
+                    "fallback_reason": product_result.get("error") if isinstance(product_result, dict) else None,
                     "product_count": len(payload.get("products") or []) if isinstance(payload, dict) else 0,
                     "structured_product_count": payload.get("structured_product_count") if isinstance(payload, dict) else 0,
                     "structured_product_names": ",".join(payload.get("structured_product_names") or [])[:500] if isinstance(payload, dict) else None,

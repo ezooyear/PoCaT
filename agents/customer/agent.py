@@ -12,6 +12,7 @@ from agents.base import (
     build_agent_trace_input,
     build_agent_trace_output,
     make_agent_result,
+    mirror_result_fields,
     run_agent_loop,
 )
 from agents.customer.prompts import CUSTOMER_SYSTEM_PROMPT
@@ -156,6 +157,10 @@ def customer_agent_node(state: AgentState) -> dict:
                     evidence=tool_results,
                     error=error,
                 )
+                structured_result = mirror_result_fields(
+                    structured_result,
+                    field_names=["tool_results", "customer_profile"],
+                )
 
                 update_observation(
                     observation,
@@ -170,7 +175,14 @@ def customer_agent_node(state: AgentState) -> dict:
                             "tool_count": len(tool_results),
                         },
                     ),
-                    metadata={"agent": "customer_agent", "status": status},
+                    metadata={
+                        "agent": "customer_agent",
+                        "status": status,
+                        "result_key": "customer_result",
+                        "input_sources": "customer_id",
+                        "output_keys": "customer_profile,tool_results",
+                        "fallback_reason": error,
+                    },
                 )
 
             outputs = dict(state.get("agent_outputs") or {})

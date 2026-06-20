@@ -12,8 +12,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from agents.base import make_agent_result
 from agents.eligibility.agent import eligibility_agent_node
+from agents.financial.agent import _finalize_financial_result_schema
+from agents.product.agent import _build_structured_product_result
 from agents.recommend.agent import recommend_agent_node
+from agents.validation.agent import validation_agent_node
 
 
 def make_base_state() -> dict:
@@ -447,6 +451,223 @@ def test_invalid_product_name_becomes_invalid_product() -> None:
     assert results[0]["eligible"] is False
 
 
+def test_product_schema_contains_products() -> None:
+    base_product_result = make_agent_result(
+        status="success",
+        result={
+            "summary": "추천 후보 상품을 조회했습니다.",
+            "tool_results": [],
+        },
+        evidence=[],
+        error=None,
+    )
+    products = [
+        {
+            "product_name": "KB 테스트 적금",
+            "product_type": "적금",
+            "base_rate": 2.0,
+            "max_rate": 2.5,
+        }
+    ]
+    product_result = _build_structured_product_result(
+        base_product_result,
+        summary="추천 후보 상품을 조회했습니다.",
+        products=products,
+        product_candidates=products,
+        performance={"tool_count": 1},
+    )
+
+    assert "products" in product_result
+    assert isinstance(product_result["products"], list)
+    assert product_result["structured_product_count"] == len(product_result["products"])
+
+
+def test_eligibility_schema_contains_grouped_keys() -> None:
+    state = make_base_state()
+    eligibility_update = eligibility_agent_node(state)
+    eligibility_result = eligibility_update.get("eligibility_result", {})
+
+    assert "results" in eligibility_result
+    assert "eligible_products" in eligibility_result
+    assert "needs_check_products" in eligibility_result
+    assert "rejected_products" in eligibility_result
+
+
+def test_financial_schema_contains_calculations() -> None:
+    result = {
+        "financial_result": make_agent_result(
+            status="success",
+            result={
+                "summary": "상품별 예상 이자와 만기금액을 계산했습니다.",
+                "tool_results": [],
+                "calculations": [
+                    {
+                        "product_name": "KB 테스트 적금",
+                        "product_type": "적금",
+                        "monthly_amount": 100000,
+                        "term_months": 12,
+                        "payment_count": 12,
+                        "applied_rate": 2.5,
+                        "principal": 1200000,
+                        "estimated_interest_before_tax": 10000,
+                        "estimated_maturity_amount": 1210000,
+                    }
+                ],
+            },
+            evidence=[],
+            error=None,
+        ),
+        "agent_outputs": {"financial_agent": {}},
+    }
+
+    finalized = _finalize_financial_result_schema(result)
+    financial_result = finalized.get("financial_result", {})
+
+    assert "calculations" in financial_result
+    assert isinstance(financial_result["calculations"], list)
+
+
+def test_recommend_schema_contains_recommendations_and_matches() -> None:
+    state = make_base_state()
+    eligibility_update = eligibility_agent_node(state)
+    state = merge_state(state, eligibility_update)
+    state["financial_results"] = [
+        {
+            "product_name": "일반정기적금",
+            "estimated_interest": 180000,
+            "maturity_amount": 7380000,
+        }
+    ]
+
+    recommend_update = recommend_agent_node(state)
+    recommend_result = recommend_update.get("recommend_result", {})
+
+    assert "recommendations" in recommend_result
+    assert "matched_products" in recommend_result
+
+
+def test_validation_schema_contains_expected_keys() -> None:
+    state = {
+        "task_type": "product_info",
+        "plan": ["product_agent", "validation_agent"],
+        "completed_agents": ["product_agent"],
+        "current_step": 1,
+        "agent_outputs": {},
+        "product_result": {
+            "status": "success",
+            "summary": "추천 후보 상품을 조회했습니다.",
+            "result": {
+                "summary": "추천 후보 상품을 조회했습니다.",
+                "products": [{"product_name": "KB 테스트 적금"}],
+            },
+            "products": [{"product_name": "KB 테스트 적금"}],
+            "evidence": [],
+            "error": None,
+        },
+    }
+
+    validation_update = validation_agent_node(state)
+    validation_result = validation_update.get("validation_result", {})
+
+    assert "is_valid" in validation_result
+    assert "failure_reasons" in validation_result
+    assert "warnings" in validation_result
+    assert "checks" in validation_result
+
+
+def test_end_to_end_schema_paths_exist() -> None:
+    state = make_base_state()
+    state["customer_result"] = {
+        "status": "success",
+        "summary": "고객 정보를 조회했습니다.",
+        "result": {
+            "summary": "고객 정보를 조회했습니다.",
+            "customer_profile": {
+                "customer_id": "customer_223",
+                "age": 21,
+                "job": "군인",
+                "income": 29000000,
+                "monthly_saving_amount": 100000,
+                "salary_transfer": True,
+                "auto_transfer": False,
+            },
+        },
+        "customer_profile": {
+            "customer_id": "customer_223",
+            "age": 21,
+            "job": "군인",
+            "income": 29000000,
+            "monthly_saving_amount": 100000,
+            "salary_transfer": True,
+            "auto_transfer": False,
+        },
+        "evidence": [],
+        "error": None,
+    }
+    state["product_result"] = {
+        "status": "success",
+        "summary": "추천 후보 상품을 조회했습니다.",
+        "result": {
+            "summary": "추천 후보 상품을 조회했습니다.",
+            "products": [{"product_name": "일반정기적금", "product_type": "적금"}],
+        },
+        "products": [{"product_name": "일반정기적금", "product_type": "적금"}],
+        "evidence": [],
+        "error": None,
+    }
+
+    eligibility_update = eligibility_agent_node(state)
+    state = merge_state(state, eligibility_update)
+    state["financial_result"] = {
+        "status": "success",
+        "summary": "상품별 예상 이자와 만기금액을 계산했습니다.",
+        "result": {
+            "summary": "상품별 예상 이자와 만기금액을 계산했습니다.",
+            "calculations": [
+                {
+                    "product_name": "일반정기적금",
+                    "product_type": "적금",
+                    "monthly_amount": 100000,
+                    "term_months": 24,
+                    "payment_count": 24,
+                    "applied_rate": 2.5,
+                    "principal": 2400000,
+                    "estimated_interest_before_tax": 50000,
+                    "estimated_maturity_amount": 2450000,
+                }
+            ],
+        },
+        "calculations": [
+            {
+                "product_name": "일반정기적금",
+                "product_type": "적금",
+                "monthly_amount": 100000,
+                "term_months": 24,
+                "payment_count": 24,
+                "applied_rate": 2.5,
+                "principal": 2400000,
+                "estimated_interest_before_tax": 50000,
+                "estimated_maturity_amount": 2450000,
+            }
+        ],
+        "evidence": [],
+        "error": None,
+    }
+    state["financial_results"] = state["financial_result"]["calculations"]
+
+    recommend_update = recommend_agent_node(state)
+    state = merge_state(state, recommend_update)
+    validation_update = validation_agent_node(state)
+    state = merge_state(state, validation_update)
+
+    assert state["customer_result"]["customer_profile"]
+    assert state["product_result"]["products"]
+    assert state["eligibility_result"]["eligible_products"] is not None
+    assert state["financial_result"]["calculations"] is not None
+    assert state["recommend_result"]["recommendations"] is not None
+    assert state["validation_result"] is not None
+
+
 def test_financial_results_missing_defers_recommendation() -> None:
     state = make_base_state()
     eligibility_update = eligibility_agent_node(state)
@@ -505,6 +726,12 @@ def main() -> None:
     test_no_values_are_treated_as_false_not_missing()
     test_customer_profile_incomplete_when_customer_info_is_really_missing()
     test_invalid_product_name_becomes_invalid_product()
+    test_product_schema_contains_products()
+    test_eligibility_schema_contains_grouped_keys()
+    test_financial_schema_contains_calculations()
+    test_recommend_schema_contains_recommendations_and_matches()
+    test_validation_schema_contains_expected_keys()
+    test_end_to_end_schema_paths_exist()
     test_financial_results_missing_defers_recommendation()
     test_no_eligible_product_does_not_force_recommendation()
     print("ALL TESTS PASSED")

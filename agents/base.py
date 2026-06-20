@@ -2,6 +2,7 @@
 Shared agent execution utilities.
 """
 
+from copy import deepcopy
 from typing import Any, Optional
 
 from langchain_core.messages import SystemMessage, ToolMessage
@@ -22,12 +23,67 @@ def make_agent_result(
     evidence: Optional[list[dict[str, Any]]] = None,
     error: Optional[str] = None,
 ) -> dict[str, Any]:
+    payload = dict(result or {})
     return {
         "status": status,
-        "result": result or {},
+        "summary": payload.get("summary"),
+        "result": payload,
         "evidence": evidence or [],
         "error": error,
     }
+
+
+def get_result_payload(agent_result: Any) -> dict[str, Any]:
+    if not isinstance(agent_result, dict):
+        return {}
+
+    payload = agent_result.get("result")
+    if isinstance(payload, dict):
+        return payload
+
+    return {}
+
+
+def get_nested_value(container: Any, *path: str) -> Any:
+    current = container
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def get_first_matching_path(
+    *candidates: tuple[str, Any, tuple[str, ...]],
+) -> tuple[Any, str]:
+    for source_name, container, path in candidates:
+        value = get_nested_value(container, *path)
+        if value is None:
+            continue
+        if isinstance(value, list) and not value:
+            continue
+        if isinstance(value, dict) and not value:
+            continue
+        if value == "":
+            continue
+        return value, source_name
+    return None, "missing"
+
+
+def mirror_result_fields(
+    agent_result: dict[str, Any],
+    *,
+    field_names: list[str],
+) -> dict[str, Any]:
+    mirrored = deepcopy(agent_result or {})
+    payload = get_result_payload(mirrored)
+
+    mirrored["summary"] = payload.get("summary")
+    for field_name in field_names:
+        if field_name in payload:
+            mirrored[field_name] = deepcopy(payload[field_name])
+
+    return mirrored
 
 
 def build_prev_context(
@@ -86,7 +142,11 @@ def build_agent_trace_output(
     extra_output: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     result_payload = agent_result.get("result", {}) if isinstance(agent_result, dict) else {}
-    summary = result_payload.get("summary") if isinstance(result_payload, dict) else None
+    summary = (
+        agent_result.get("summary")
+        if isinstance(agent_result, dict) and agent_result.get("summary") is not None
+        else result_payload.get("summary") if isinstance(result_payload, dict) else None
+    )
 
     payload: dict[str, Any] = {
         "agent_name": agent_name,
@@ -203,6 +263,10 @@ def run_agent_loop(
                 },
                 evidence=tool_results,
                 error=error,
+            )
+            structured_result = mirror_result_fields(
+                structured_result,
+                field_names=["tool_results"],
             )
 
             update_observation(

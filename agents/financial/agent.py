@@ -6,8 +6,16 @@ import re
 from datetime import date, datetime
 from typing import Any
 
+from agents.base import (
+    build_agent_trace_input,
+    build_agent_trace_output,
+    get_first_matching_path,
+    make_agent_result,
+    mirror_result_fields,
+    run_agent_loop,
+)
+from observability.langfuse import flush_langfuse, langfuse_observation, update_observation
 from graph.state import AgentState
-from agents.base import run_agent_loop
 from agents.financial.prompts import FINANCIAL_SYSTEM_PROMPT
 from agents.financial.tools import FINANCIAL_TOOLS, compare_switch_benefit
 
@@ -15,7 +23,7 @@ from agents.financial.tools import FINANCIAL_TOOLS, compare_switch_benefit
 DEFAULT_TAX_RATE = 0.154
 
 
-def financial_agent_node(state: AgentState) -> dict:
+def _financial_agent_node_impl(state: AgentState) -> dict:
     result = run_agent_loop(
         state=state,
         system_prompt=FINANCIAL_SYSTEM_PROMPT,
@@ -31,8 +39,76 @@ def financial_agent_node(state: AgentState) -> dict:
     result = _augment_maturity_estimate_result(state, result)
     result = _enforce_financial_role_boundary(result)
     result = _augment_recommendation_calculations(state, result)
+    result = _finalize_financial_result_schema(result)
 
     return result
+
+
+def financial_agent_node(state: AgentState) -> dict:
+    try:
+        with langfuse_observation(
+            name="financial_agent",
+            as_type="span",
+            input=build_agent_trace_input(
+                state,
+                agent_name="financial_agent",
+                result_key="financial_result",
+                max_iterations=5,
+            ),
+            metadata={"agent": "financial_agent", "phase": "finalize"},
+        ) as observation:
+            result = _financial_agent_node_impl(state)
+            financial_result = result.get("financial_result", {})
+            calculations = _extract_calculations_from_result(financial_result)
+            fallback_reason = None
+            missing_fields: list[str] = []
+            if isinstance(financial_result, dict):
+                fallback_reason = financial_result.get("fallback_reason") or (
+                    financial_result.get("result", {}) if isinstance(financial_result.get("result", {}), dict) else {}
+                ).get("fallback_reason")
+                missing_fields = list(
+                    financial_result.get("missing_fields")
+                    or (
+                        financial_result.get("result", {})
+                        if isinstance(financial_result.get("result", {}), dict)
+                        else {}
+                    ).get("missing_fields")
+                    or []
+                )
+
+            update_observation(
+                observation,
+                output=build_agent_trace_output(
+                    financial_result,
+                    agent_name="financial_agent",
+                    state=state,
+                    result_key="financial_result",
+                    extra_output={
+                        "calculations": calculations,
+                        "financial_calculation_count": len(calculations),
+                        "financial_calculation_product_names": [
+                            item.get("product_name") for item in calculations if isinstance(item, dict)
+                        ],
+                        "fallback_reason": fallback_reason,
+                        "missing_fields": missing_fields,
+                    },
+                ),
+                metadata={
+                    "agent": "financial_agent",
+                    "status": financial_result.get("status") if isinstance(financial_result, dict) else None,
+                    "result_key": "financial_result",
+                    "input_sources": "eligibility_result.eligible_products;product_result.products;customer_result.customer_profile",
+                    "output_keys": "calculations,financial_calculation_count,financial_calculation_product_names",
+                    "fallback_reason": fallback_reason,
+                    "financial_calculation_count": len(calculations),
+                    "financial_calculation_product_names": ",".join(
+                        item.get("product_name", "") for item in calculations if isinstance(item, dict)
+                    )[:500] or None,
+                },
+            )
+            return result
+    finally:
+        flush_langfuse()
 
 
 def _augment_maturity_estimate_result(state: AgentState, result: dict) -> dict:
@@ -372,25 +448,119 @@ def _augment_recommendation_calculations(state: AgentState, result: dict) -> dic
     return result
 
 
-def _extract_eligible_products(state: AgentState) -> list[dict]:
-    eligibility_result = state.get("eligibility_result") or {}
-    if not isinstance(eligibility_result, dict):
-        return []
-    payload = eligibility_result.get("result", {})
+def _finalize_financial_result_schema(result: dict[str, Any]) -> dict[str, Any]:
+    financial_result = result.get("financial_result")
+    if not isinstance(financial_result, dict):
+        fallback = make_agent_result(
+            status="failed",
+            result={
+                "status": "needs_check",
+                "summary": "금융 계산 결과를 생성하지 못했습니다.",
+                "calculations": [],
+                "missing_fields": ["financial_result"],
+                "fallback_reason": "financial_result_missing",
+            },
+            evidence=[],
+            error="financial_result missing",
+        )
+        fallback = mirror_result_fields(
+            fallback,
+            field_names=["calculations", "missing_fields", "fallback_reason"],
+        )
+        result["financial_result"] = fallback
+        return result
+
+    payload = financial_result.get("result", {})
     if not isinstance(payload, dict):
+        payload = {}
+
+    calculations = _extract_calculations_from_result(financial_result)
+    financial_result["summary"] = payload.get("summary") or financial_result.get("summary")
+    payload["calculations"] = calculations
+    payload.setdefault("financial_calculation_count", len(calculations))
+    payload.setdefault(
+        "financial_calculation_product_names",
+        [item.get("product_name") for item in calculations if isinstance(item, dict)],
+    )
+
+    if not calculations:
+        # 계산 결과가 없으면 downstream이 확정 추천을 만들지 않도록 이유를 구조화합니다.
+        payload.setdefault("status", "needs_check")
+        payload.setdefault("missing_fields", ["calculations"])
+        payload.setdefault("fallback_reason", "missing_required_calculation_fields")
+        if financial_result.get("status") == "success":
+            financial_result["status"] = "needs_check"
+    else:
+        payload.setdefault("status", "success")
+        payload.setdefault("missing_fields", [])
+        payload.setdefault("fallback_reason", None)
+        financial_result["status"] = financial_result.get("status") or "success"
+
+    financial_result["result"] = payload
+    financial_result = mirror_result_fields(
+        financial_result,
+        field_names=[
+            "tool_results",
+            "calculations",
+            "financial_calculation_count",
+            "financial_calculation_product_names",
+            "missing_fields",
+            "fallback_reason",
+        ],
+    )
+
+    result["financial_result"] = financial_result
+    result["financial_results"] = calculations
+
+    agent_outputs = dict(result.get("agent_outputs") or {})
+    if isinstance(agent_outputs.get("financial_agent"), dict):
+        agent_outputs["financial_agent"] = mirror_result_fields(
+            financial_result,
+            field_names=[
+                "tool_results",
+                "calculations",
+                "financial_calculation_count",
+                "financial_calculation_product_names",
+                "missing_fields",
+                "fallback_reason",
+            ],
+        )
+    result["agent_outputs"] = agent_outputs
+    return result
+
+
+def _extract_calculations_from_result(financial_result: Any) -> list[dict[str, Any]]:
+    if not isinstance(financial_result, dict):
         return []
-    return list(payload.get("eligible_products") or [])
+    calculations = financial_result.get("calculations")
+    if isinstance(calculations, list):
+        return calculations
+    payload = financial_result.get("result", {})
+    if isinstance(payload, dict) and isinstance(payload.get("calculations"), list):
+        return payload.get("calculations") or []
+    return []
+
+
+def _extract_eligible_products(state: AgentState) -> list[dict]:
+    products, _ = get_first_matching_path(
+        ("state.eligibility_results", state, ("eligibility_results",)),
+        ("eligibility_result.eligible_products", state.get("eligibility_result"), ("eligible_products",)),
+        ("eligibility_result.result.eligible_products", state.get("eligibility_result"), ("result", "eligible_products")),
+        ("agent_outputs.eligibility_agent.eligible_products", state.get("agent_outputs"), ("eligibility_agent", "eligible_products")),
+        ("agent_outputs.eligibility_agent.result.eligible_products", state.get("agent_outputs"), ("eligibility_agent", "result", "eligible_products")),
+    )
+    return list(products or []) if isinstance(products, list) else []
 
 
 def _build_product_map(state: AgentState) -> dict[str, dict]:
-    product_result = state.get("product_result") or {}
-    products: list[dict] = []
-    if isinstance(product_result, dict):
-        products = (
-            product_result.get("products")
-            or (product_result.get("result") or {}).get("products")
-            or []
-        )
+    products, _ = get_first_matching_path(
+        ("state.product_candidates", state, ("product_candidates",)),
+        ("product_result.products", state.get("product_result"), ("products",)),
+        ("product_result.result.products", state.get("product_result"), ("result", "products")),
+        ("agent_outputs.product_agent.products", state.get("agent_outputs"), ("product_agent", "products")),
+        ("agent_outputs.product_agent.result.products", state.get("agent_outputs"), ("product_agent", "result", "products")),
+    )
+    products = list(products or []) if isinstance(products, list) else []
     return {
         _norm(str(p.get("product_name") or "")): p
         for p in products

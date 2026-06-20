@@ -26,7 +26,7 @@ from typing import Any
 from graph.state import AgentState
 
 
-REQUIRED_RESULT_KEYS = ["status", "result", "evidence", "error"]
+REQUIRED_RESULT_KEYS = ["status", "summary", "result", "evidence", "error"]
 
 
 REQUIRED_RESULTS_BY_TASK = {

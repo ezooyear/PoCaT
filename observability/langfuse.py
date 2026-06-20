@@ -136,6 +136,8 @@ def _serialize_preview(value: Any, *, max_length: int = 800) -> str:
 
 
 def is_langfuse_enabled() -> bool:
+    if str(os.getenv("LANGFUSE_DISABLED", "")).strip().lower() in {"1", "true", "yes", "on"}:
+        return False
     public_key = os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
     secret_key = os.getenv("LANGFUSE_SECRET_KEY", "").strip()
     return bool(public_key and secret_key)

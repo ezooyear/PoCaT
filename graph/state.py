@@ -41,6 +41,8 @@ class AgentState(TypedDict, total=False):
     # 3. 고객 식별 정보
     member_id: Optional[str]
     customer_id: Optional[int]
+    customer_profile: Optional[dict[str, Any]]
+    customer_accounts: Optional[list[dict[str, Any]]]
 
     # 4. 에이전트 간 공통 데이터 전달
     context: Optional[dict[str, Any]]
@@ -55,6 +57,10 @@ class AgentState(TypedDict, total=False):
     financial_result: Optional[dict[str, Any]]
     eligibility_result: Optional[dict[str, Any]]
     recommend_result: Optional[dict[str, Any]]
+    product_candidates: Optional[list[dict[str, Any]]]
+    eligibility_results: Optional[list[dict[str, Any]]]
+    financial_results: Optional[list[dict[str, Any]]]
+    recommendation_results: Optional[list[dict[str, Any]]]
 
     # 6. Validation 관련 결과
     validation_result: Optional[dict[str, Any]]

@@ -9,7 +9,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
-from agents.base import make_agent_result
+from agents.base import get_first_matching_path, make_agent_result, mirror_result_fields
 from agents.recommend.prompts import RECOMMEND_SYSTEM_PROMPT
 from agents.recommend.tools import (
     build_recommendation_summary,
@@ -97,6 +97,22 @@ def recommend_agent_node(state: AgentState) -> dict:
                 evidence=recommendations,
                 error=None,
             )
+            recommend_result = mirror_result_fields(
+                recommend_result,
+                field_names=[
+                    "recommendations",
+                    "recommended_products",
+                    "recommendation_count",
+                    "excluded_products",
+                    "fallback_reason",
+                    "required_next_steps",
+                    "financial_results",
+                    "financial_calculation_source",
+                    "financial_calculation_count",
+                    "financial_calculation_product_names",
+                    "matched_products",
+                ],
+            )
             agent_outputs["recommend_agent"] = recommend_result
 
             update_observation(
@@ -122,6 +138,9 @@ def recommend_agent_node(state: AgentState) -> dict:
                     "agent": "recommend_agent",
                     "task_type": state.get("task_type"),
                     "status": status,
+                    "result_key": "recommend_result",
+                    "input_sources": f"eligibility_results;product_candidates;financial_results:{financial_calculation_source}",
+                    "output_keys": "recommendations,matched_products,excluded_products",
                     "fallback_reason": fallback_reason,
                     "financial_calculation_source": financial_calculation_source,
                     "financial_calculation_count": len(financial_results),
@@ -172,51 +191,44 @@ def recommend_agent_node(state: AgentState) -> dict:
 
 
 def _load_eligibility_results(state: AgentState) -> list[dict]:
-    eligibility_results = state.get("eligibility_results") or []
-    if eligibility_results:
-        return eligibility_results
-
-    eligibility_result = state.get("eligibility_result") or {}
-    if isinstance(eligibility_result, dict):
-        payload = eligibility_result.get("result", {})
-        if isinstance(payload, dict):
-            results = payload.get("results") or []
-            if isinstance(results, list):
-                return results
-    return []
+    results, _ = get_first_matching_path(
+        ("state.eligibility_results", state, ("eligibility_results",)),
+        ("eligibility_result.results", state.get("eligibility_result"), ("results",)),
+        ("eligibility_result.result.results", state.get("eligibility_result"), ("result", "results")),
+        ("agent_outputs.eligibility_agent.results", state.get("agent_outputs"), ("eligibility_agent", "results")),
+        ("agent_outputs.eligibility_agent.result.results", state.get("agent_outputs"), ("eligibility_agent", "result", "results")),
+    )
+    return list(results or []) if isinstance(results, list) else []
 
 
 def _load_product_candidates(state: AgentState, agent_outputs: dict) -> list[dict]:
-    product_candidates = state.get("product_candidates")
-    if isinstance(product_candidates, list):
-        return product_candidates
-
-    product_result = state.get("product_result") or {}
-    if isinstance(product_result, dict):
-        payload = product_result.get("result", {})
-        if isinstance(payload, dict) and isinstance(payload.get("product_candidates"), list):
-            return payload.get("product_candidates") or []
-
-    product_agent_output = agent_outputs.get("product_agent") or {}
-    if isinstance(product_agent_output, dict):
-        payload = product_agent_output.get("result", {})
-        if isinstance(payload, dict) and isinstance(payload.get("product_candidates"), list):
-            return payload.get("product_candidates") or []
-
-    return []
+    product_candidates, _ = get_first_matching_path(
+        ("state.product_candidates", state, ("product_candidates",)),
+        ("product_result.products", state.get("product_result"), ("products",)),
+        ("product_result.result.products", state.get("product_result"), ("result", "products")),
+        ("product_result.product_candidates", state.get("product_result"), ("product_candidates",)),
+        ("product_result.result.product_candidates", state.get("product_result"), ("result", "product_candidates")),
+        ("agent_outputs.product_agent.products", agent_outputs, ("product_agent", "products")),
+        ("agent_outputs.product_agent.result.products", agent_outputs, ("product_agent", "result", "products")),
+        ("agent_outputs.product_agent.result.product_candidates", agent_outputs, ("product_agent", "result", "product_candidates")),
+    )
+    return list(product_candidates or []) if isinstance(product_candidates, list) else []
 
 
 def _load_financial_results(state: AgentState, agent_outputs: dict) -> tuple[list[dict], str]:
     """financial 계산 결과를 로드하고 (results, source) 튜플 반환."""
-    financial_results = state.get("financial_results")
+    financial_results, source = get_first_matching_path(
+        ("state.financial_results", state, ("financial_results",)),
+        ("financial_result.calculations", state.get("financial_result"), ("calculations",)),
+        ("financial_result.result.calculations", state.get("financial_result"), ("result", "calculations")),
+        ("agent_outputs.financial_agent.calculations", agent_outputs, ("financial_agent", "calculations")),
+        ("agent_outputs.financial_agent.result.calculations", agent_outputs, ("financial_agent", "result", "calculations")),
+    )
     if isinstance(financial_results, list) and financial_results:
-        return financial_results, "state.financial_results"
+        return financial_results, source
 
     financial_result = state.get("financial_result")
     if financial_result:
-        calcs = _extract_calculations(financial_result)
-        if calcs:
-            return calcs, "financial_result.calculations"
         extracted = _extract_financial_results_from_container(financial_result)
         if extracted:
             return extracted, "financial_result.tool_results"
@@ -497,6 +509,18 @@ def _build_recommend_exception_fallback(state: AgentState, error_message: str) -
         },
         evidence=[],
         error=error_message,
+    )
+    fallback_result = mirror_result_fields(
+        fallback_result,
+        field_names=[
+            "recommendations",
+            "recommended_products",
+            "recommendation_count",
+            "excluded_products",
+            "fallback_reason",
+            "required_next_steps",
+            "financial_results",
+        ],
     )
 
     agent_outputs = dict(state.get("agent_outputs") or {})
