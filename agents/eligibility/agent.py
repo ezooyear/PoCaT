@@ -334,13 +334,27 @@ def _has_customer_result_text(customer_result: dict[str, Any]) -> bool:
 
 
 def _load_product_candidates(state: AgentState, product_result: dict, agent_outputs: dict) -> list[dict]:
-    product_candidates = state.get("product_candidates")
+    product_candidates = state.get("product_candidates") or []
+
     if not product_candidates:
-        product_candidates = _extract_product_candidates_from_result(product_result)
+        if isinstance(product_result, dict):
+            payload = product_result.get("result", {})
+            if isinstance(payload, dict):
+                candidate_list = payload.get("products") or payload.get("product_candidates")
+                if isinstance(candidate_list, list):
+                    product_candidates = [dict(item) for item in candidate_list if isinstance(item, dict)]
+
+    if not product_candidates:
+        if isinstance(agent_outputs.get("product_agent"), dict):
+            payload = agent_outputs["product_agent"].get("result", {})
+            if isinstance(payload, dict):
+                candidate_list = payload.get("products") or payload.get("product_candidates")
+                if isinstance(candidate_list, list):
+                    product_candidates = [dict(item) for item in candidate_list if isinstance(item, dict)]
+
     if not product_candidates:
         product_candidates = extract_product_candidates(_extract_summary(agent_outputs.get("product_agent")))
-    else:
-        product_candidates = extract_product_candidates(product_candidates)
+
     return product_candidates
 
 

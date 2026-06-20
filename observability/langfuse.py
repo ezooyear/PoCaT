@@ -72,6 +72,45 @@ def summarize_for_langfuse(value: Any, *, max_length: int = 800) -> Any:
     return str(value)[:max_length]
 
 
+def safe_jsonable(value: Any, *, max_depth: int = 3, max_length: int = 800) -> Any:
+    """값을 JSON 직렬화 가능한 형태로 안전하게 변환합니다."""
+    seen = set()
+
+    def _safe(inner: Any, depth: int) -> Any:
+        if id(inner) in seen:
+            return "[circular]"
+        if depth < 0:
+            return str(inner)[:max_length]
+
+        if inner is None or isinstance(inner, (bool, int, float, str)):
+            if isinstance(inner, str):
+                return inner[:max_length]
+            return inner
+
+        if isinstance(inner, dict):
+            seen.add(id(inner))
+            output: dict[str, Any] = {}
+            for key, item in inner.items():
+                if key is None:
+                    continue
+                output[str(key)] = _safe(item, depth - 1)
+            return output
+
+        if isinstance(inner, (list, tuple)):
+            seen.add(id(inner))
+            items = [_safe(item, depth - 1) for item in list(inner)[:20]]
+            if len(inner) > 20:
+                items.append({"_truncated": True, "original_count": len(inner)})
+            return items
+
+        try:
+            return str(inner)[:max_length]
+        except Exception:
+            return "[unserializable]"
+
+    return _safe(value, max_depth)
+
+
 def _serialize_preview(value: Any, *, max_length: int = 800) -> str:
     summarized = summarize_for_langfuse(value, max_length=max_length)
 

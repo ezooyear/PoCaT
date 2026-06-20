@@ -8,7 +8,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
-from agents.base import make_agent_result
+from agents.base import get_financial_calculations, get_product_candidates, make_agent_result
 from agents.recommend.prompts import RECOMMEND_SYSTEM_PROMPT
 from agents.recommend.tools import (
     build_recommendation_summary,
@@ -71,21 +71,63 @@ def recommend_agent_node(state: AgentState) -> dict:
                 fallback_reason=fallback_reason,
             )
 
+            normalized_recommendations = []
+            for item in recommendations:
+                normalized_recommendations.append(
+                    {
+                        "rank": item.get("rank"),
+                        "product_name": item.get("product_name"),
+                        "product_type": item.get("product_type") or None,
+                        "recommendation_status": "recommended" if status == "recommended" else status,
+                        "reason": item.get("reason") or "추천 사유가 생성되지 않았습니다.",
+                        "eligibility_status": item.get("status") or "eligible",
+                        "applied_rate": item.get("applied_rate") or item.get("base_rate"),
+                        "estimated_maturity_amount": item.get("maturity_amount"),
+                        "estimated_interest_before_tax": item.get("estimated_interest"),
+                        "warnings": item.get("warnings") or [],
+                        "source_product_name": item.get("product_name"),
+                        **{k: v for k, v in item.items() if k not in {"rank", "product_name", "product_type", "status", "reason", "applied_rate", "maturity_amount", "estimated_interest", "warnings"}},
+                    }
+                )
+
+            product_names = [_normalize_name(item.get("product_name")) for item in product_candidates if item.get("product_name")]
+            financial_names = [_normalize_name(item.get("product_name")) for item in financial_results if item.get("product_name")]
+            matched_products = [
+                {
+                    "product_name": item.get("product_name"),
+                    "has_product": True,
+                    "has_eligibility": True,
+                    "has_financial_calculation": _normalize_name(item.get("product_name", "")) in financial_names,
+                }
+                for item in normalized_recommendations
+            ]
+            unmatched_products = [
+                {
+                    "product_name": str(item.get("product_name")),
+                    "has_product": _normalize_name(item.get("product_name", "")) in product_names,
+                    "has_eligibility": False,
+                    "has_financial_calculation": _normalize_name(item.get("product_name", "")) in financial_names,
+                }
+                for item in excluded_products
+            ]
+
             recommend_result = make_agent_result(
                 status="success",
                 result={
                     "status": status,
                     "summary": summary,
-                    "recommendations": recommendations,
-                    "recommended_products": recommendations,
-                    "recommendation_count": len(recommendations),
+                    "recommendations": normalized_recommendations,
+                    "recommended_products": normalized_recommendations,
+                    "recommendation_count": len(normalized_recommendations),
+                    "matched_products": matched_products,
+                    "unmatched_products": unmatched_products,
                     "excluded_products": excluded_products,
                     "fallback_reason": fallback_reason,
                     "required_next_steps": required_next_steps,
                     "financial_results": financial_results,
                     "source_agent": "recommend_agent",
                 },
-                evidence=recommendations,
+                evidence=normalized_recommendations,
                 error=None,
             )
             agent_outputs["recommend_agent"] = recommend_result
@@ -172,9 +214,13 @@ def _load_eligibility_results(state: AgentState) -> list[dict]:
 
 
 def _load_product_candidates(state: AgentState, agent_outputs: dict) -> list[dict]:
-    product_candidates = state.get("product_candidates")
-    if isinstance(product_candidates, list):
-        return product_candidates
+    candidates = state.get("product_candidates")
+    if isinstance(candidates, list) and candidates:
+        return candidates
+
+    products = get_product_candidates(state)
+    if isinstance(products.get("data"), list) and products.get("data"):
+        return products["data"]
 
     product_result = state.get("product_result") or {}
     if isinstance(product_result, dict):
@@ -193,8 +239,12 @@ def _load_product_candidates(state: AgentState, agent_outputs: dict) -> list[dic
 
 def _load_financial_results(state: AgentState, agent_outputs: dict) -> list[dict]:
     financial_results = state.get("financial_results")
-    if isinstance(financial_results, list):
+    if isinstance(financial_results, list) and financial_results:
         return financial_results
+
+    financial_path = get_financial_calculations(state)
+    if isinstance(financial_path.get("data"), list) and financial_path.get("data"):
+        return financial_path["data"]
 
     financial_result = state.get("financial_result")
     if financial_result:
