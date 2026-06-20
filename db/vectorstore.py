@@ -33,7 +33,7 @@ def _get_embeddings():
     if _EMBEDDINGS_INSTANCE is None:
         _EMBEDDINGS_INSTANCE = HuggingFaceEmbeddings(
             model_name=EMBEDDING_MODEL_NAME,
-            model_kwargs={"device": "mps"},
+            model_kwargs={"device": "cpu"},
             encode_kwargs={"normalize_embeddings": True},
         )
     return _EMBEDDINGS_INSTANCE
