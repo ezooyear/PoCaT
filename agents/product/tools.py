@@ -47,9 +47,9 @@ def search_terms(query: str) -> str:
     Args:
         query: 검색할 질문 (예: "KB Star 정기예금 가입 제한 나이 및 최소 가입금액 조건", "KB국민은행 모든 예적금 상품 목록과 가입 요건")
     """
-    # Dynamic K 적용: 질문에 비교 분석형 성격이 담겨 있으면 더 넉넉한 컨텍스트(k=6) 확보, 그렇지 않으면 k=3
+    # Dynamic K 적용: 질문에 비교 분석형 성격이 담겨 있으면 더 넉넉한 컨텍스트(k=6) 확보, 그렇지 않으면 k=4
     is_comparative = any(keyword in query for keyword in ["비교", "차이", "모두", "목록", "공통", "다른점"])
-    target_k = 6 if is_comparative else 3
+    target_k = 6 if is_comparative else 4
 
     # RAG 검색 최적화를 위한 쿼리 재정형 적용
     reformed_query = reformulate_query(query)

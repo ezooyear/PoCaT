@@ -32,7 +32,7 @@ streamlit>=1.30.0
 
 # Observability
 langfuse>=4.7.0
-ragas==0.1.21
+ragas>=0.2.4
 
 # MCP
 mcp[cli]>=1.27,<2
