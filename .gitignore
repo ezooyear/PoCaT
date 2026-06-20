@@ -7,3 +7,4 @@ data/products.json
 data/chroma_db/
 data/pdfs/*.pdf
 *.db
+/.claude
