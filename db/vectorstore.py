@@ -170,28 +170,56 @@ def get_vectorstore():
 
 def search_products(query: str, k: int = 3) -> List[Document]:
     """
-    초경량 임베딩 모델을 사용하여 ChromaDB에서 유사도 검색(Dense)을 수행한 후,
-    Cross-Encoder 리랭킹을 거쳐 가장 관련성 높은 부모 문서(Parent Document)들을 반환합니다.
+    초경량 임베딩 모델을 사용한 유사도 검색(Dense)과 BM25 키워드 검색(Sparse)을 결합한
+    하이브리드 검색 후보군을 추출한 후, Cross-Encoder 리랭킹을 거쳐 최종 k개의 부모 문서를 반환합니다.
     """
     vectorstore = get_vectorstore()
     if vectorstore is None:
         print("⚠️ Vector DB를 찾을 수 없습니다. 빈 결과를 반환합니다.")
         return []
 
-    # 1. 1차 후보군 추출 개수 설정 (최대 후보 20개, k 배수 확장)
-    candidates_limit = max(k * 5, 20)
+    # 1. 각각의 검색 방식에서 추출할 1차 후보 수 (기본 k=4일 때 각각 15개 내외)
+    candidates_limit = max(k * 4, 15)
 
-    # 2. Dense 검색 (유사도 검색)
+    # A. Dense 검색 (유사도 검색)
     dense_results = vectorstore.similarity_search(query, k=candidates_limit)
-    if not dense_results:
+
+    # B. Sparse (BM25) 검색 (키워드 매칭)
+    all_docs = _get_all_docs(vectorstore)
+    sparse_results = []
+    if all_docs:
+        sparse_results = _search_sparse_with_bm25(all_docs, query, candidates_limit)
+
+    # C. 두 결과의 하이브리드 병합 및 자식 청크 중복 제거 (리랭커 부하 제어)
+    seen_chunk_contents = set()
+    merged_candidates = []
+
+    # Dense 결과 먼저 삽입
+    for doc in dense_results:
+        chunk_txt = doc.page_content
+        if chunk_txt not in seen_chunk_contents:
+            seen_chunk_contents.add(chunk_txt)
+            merged_candidates.append(doc)
+
+    # Sparse 결과 추가 삽입
+    for doc in sparse_results:
+        chunk_txt = doc.page_content
+        if chunk_txt not in seen_chunk_contents:
+            seen_chunk_contents.add(chunk_txt)
+            merged_candidates.append(doc)
+
+    # 리랭킹할 후보군의 상한선 설정 (최대 30개)
+    final_candidates = merged_candidates[:30]
+
+    if not final_candidates:
         return []
 
-    # 3. Cross-Encoder 리랭킹 (Reranker)
+    # 2. Cross-Encoder 리랭킹 (Reranker)
     reranker = _get_reranker()
     
     # 쿼리와 각 후보 문서의 '부모 본문(parent_content)'을 쌍으로 구성하여 예측
     pairs = []
-    for doc in dense_results:
+    for doc in final_candidates:
         parent_txt = doc.metadata.get("parent_content", doc.page_content)
         pairs.append([query, parent_txt])
 
@@ -200,12 +228,12 @@ def search_products(query: str, k: int = 3) -> List[Document]:
     
     # 문서와 점수를 매핑하여 정렬
     ranked_docs = sorted(
-        zip(dense_results, scores),
+        zip(final_candidates, scores),
         key=lambda x: x[1],
         reverse=True
     )
 
-    # 4. 최종 결과 취합 및 부모 문서 수준 중복 제거 (Deduplicate Parent Chunks)
+    # 3. 최종 결과 취합 및 부모 문서 수준 중복 제거 (Deduplicate Parent Chunks)
     final_docs = []
     seen_parents = set()
 
