@@ -8,3 +8,4 @@ data/chroma_db/
 data/pdfs/*.pdf
 *.db
 /.claude
+.mcp.json

@@ -18,6 +18,24 @@ from observability.langfuse import (
 )
 
 
+def _invoke_with_retry(model: Any, messages: list, attempts: int = 3, base_delay: float = 1.5):
+    """LLM 호출을 일시적 API 오류에 대해 재시도한다.
+
+    OpenRouter 무료/공용 모델은 간헐적으로 잘린(truncated) 응답을 반환해
+    'Response validation failed: EOF while parsing a value ...' 같은 파싱 오류를 낸다.
+    대부분 일시적이므로 짧은 백오프로 재시도해 흡수한다. 마지막 시도도 실패하면 예외를 그대로 올린다.
+    """
+    last_error: Optional[Exception] = None
+    for attempt in range(attempts):
+        try:
+            return model.invoke(messages)
+        except Exception as error:  # noqa: BLE001 - 일시적 API 오류 전반을 재시도 대상으로 본다
+            last_error = error
+            if attempt < attempts - 1:
+                time.sleep(base_delay * (attempt + 1))
+    raise last_error
+
+
 def make_agent_result(
     status: str = "success",
     result: Optional[dict[str, Any]] = None,
@@ -238,7 +256,7 @@ def run_agent_loop(
             messages = [SystemMessage(content=prompt)] + list(state.get("messages") or [])
 
             for _ in range(max_iterations):
-                response = llm_with_tools.invoke(messages)
+                response = _invoke_with_retry(llm_with_tools, messages)
                 messages.append(response)
 
                 if not response.tool_calls:
@@ -274,7 +292,7 @@ def run_agent_loop(
                         )
                     )
             else:
-                response = llm.invoke(messages)
+                response = _invoke_with_retry(llm, messages)
 
             summary = response.content if response else ""
             status = "failed" if tool_errors else "success"

@@ -14,9 +14,16 @@ import re
 import time
 from typing import Any
 
+from langchain_core.messages import AIMessage
+
 from agents.base import make_agent_result, run_agent_loop
 from agents.product.prompts import PRODUCT_SYSTEM_PROMPT
-from agents.product.tools import PRODUCT_TOOLS, extract_product_candidates_from_search_results
+from agents.product.tools import (
+    PRODUCT_TOOLS,
+    extract_product_candidates_from_search_results,
+    get_product_detail_map,
+    _normalize_product_key,
+)
 from graph.state import AgentState
 from observability.langfuse import langfuse_observation, update_observation, safe_jsonable
 
@@ -110,17 +117,42 @@ def _normalize_product_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     term_options = _extract_term_options(raw_text)
     preferential_conditions = _extract_preferential_conditions(raw_text)
 
+    # products 테이블 정형 값으로 보강 — RAG 텍스트 정규식 파싱(금액/금리/기간/연령)의
+    # 오류를 차단하고 다운스트림이 신뢰할 수 있는 값을 쓰게 한다. DB 값이 있으면 우선한다.
+    detail = get_product_detail_map().get(_normalize_product_key(name)) or {}
+
+    db_base_rate = float(detail["base_rate"]) if detail.get("base_rate") is not None else None
+    db_max_rate = float(detail["max_rate"]) if detail.get("max_rate") is not None else None
+    base_rate = db_base_rate if db_base_rate is not None else base_rate
+    max_rate = db_max_rate if db_max_rate is not None else max_rate
+
+    db_min_amount = int(detail["min_amount"]) if detail.get("min_amount") is not None else None
+    db_max_amount = int(detail["max_amount"]) if detail.get("max_amount") is not None else None
+    min_amount_final = db_min_amount if db_min_amount is not None else min_amount
+    max_amount_final = db_max_amount if db_max_amount is not None else max_amount
+
+    db_min_period = detail.get("min_period_months")
+    db_max_period = detail.get("max_period_months")
+
     return {
-        "product_id": candidate.get("product_id"),
+        "product_id": detail.get("product_id", candidate.get("product_id")),
         "product_name": name,
         "bank": bank,
-        "product_type": product_type,
+        "product_type": detail.get("product_type") or product_type,
         "base_rate": base_rate,
         "max_rate": max_rate,
         "base_rate_text": f"연 {base_rate:.2f}%" if base_rate is not None else None,
         "max_rate_text": f"연 {max_rate:.2f}%" if max_rate is not None else None,
-        "min_monthly_amount": min_amount,
-        "max_monthly_amount": max_amount,
+        # eligibility가 읽는 표준 키(min_amount/max_amount)와 기존 키를 모두 채운다.
+        "min_amount": min_amount_final,
+        "max_amount": max_amount_final,
+        "min_monthly_amount": min_amount_final,
+        "max_monthly_amount": max_amount_final,
+        "min_period_months": db_min_period,
+        "max_period_months": db_max_period,
+        "age_min": detail.get("age_min"),
+        "age_max": detail.get("age_max"),
+        "is_active": detail.get("is_active"),
         "term_options_months": term_options,
         "eligibility_text": _extract_eligibility_text(raw_text),
         "preferential_conditions_text": _extract_preferential_conditions_text(raw_text),
@@ -129,12 +161,12 @@ def _normalize_product_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
             {
                 "field": "raw_text",
                 "value": raw_text[:200],
-                "source": "rag_search",
+                "source": "products_table" if detail else "rag_search",
                 "text": raw_text[:200],
-                "confidence": "low",
+                "confidence": "high" if detail else "low",
             }
         ],
-        "source": "rag_search",
+        "source": "rag_search+products_table" if detail else "rag_search",
         "raw_text": raw_text,
     }
 
@@ -514,10 +546,47 @@ def product_agent_node(state: AgentState) -> dict:
                 )
 
         except Exception as exc:
+            # 다른 에이전트(eligibility/recommend)와 동일하게 예외를 그래프 밖으로 전파하지 않고
+            # graceful fallback을 반환한다. (재시도에도 LLM API가 끝내 실패한 경우 앱 전체 크래시를 막는다.)
             outer_meta["status"] = "error"
             outer_meta["fallback_reason"] = "exception"
             outer_meta["error"] = str(exc)[:500]
-            raise
+
+            product_result_fallback = make_agent_result(
+                status="failed",
+                result={
+                    "status": "failed",
+                    "summary": "상품 정보를 불러오는 중 일시적 오류가 발생해 상품 검색 결과를 사용할 수 없습니다.",
+                    "products": [],
+                    "product_candidates": [],
+                    "structured_product_count": 0,
+                    "structured_product_names": [],
+                    "source_agent": "product_agent",
+                },
+                evidence=[],
+                error=str(exc),
+            )
+
+            agent_outputs = dict(state.get("agent_outputs") or {})
+            agent_outputs["product_agent"] = product_result_fallback
+
+            completed = list(state.get("completed_agents") or [])
+            if "product_agent" not in completed:
+                completed.append("product_agent")
+
+            errors = list(state.get("errors") or [])
+            errors.append({"agent": "product_agent", "error": str(exc)})
+
+            result = {
+                "messages": [AIMessage(content=product_result_fallback["result"]["summary"])],
+                "agent_outputs": agent_outputs,
+                "current_step": (state.get("current_step") or 0) + 1,
+                "current_agent": "product_agent",
+                "completed_agents": completed,
+                "product_result": product_result_fallback,
+                "product_candidates": [],
+                "errors": errors,
+            }
 
         finally:
             duration_ms = int((time.time() - start_time) * 1000)

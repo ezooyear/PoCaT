@@ -93,7 +93,114 @@ def extract_product_candidates_from_search_results(raw_results: Any) -> list[dic
     return candidates
 
 
+_PRODUCT_NAME_MAP: dict[str, str] | None = None
+
+
+def _get_product_name_map() -> dict[str, str]:
+    """products.rag_document_key → product_name 매핑을 1회 로드한다.
+
+    PDF 파일명 stem == rag_document_key 이므로, RAG 청크의 출처 파일명으로
+    DB의 정규 상품명을 복원할 수 있다. DB 접근 실패 시 빈 맵으로 degrade한다.
+    """
+    global _PRODUCT_NAME_MAP
+    if _PRODUCT_NAME_MAP is None:
+        _PRODUCT_NAME_MAP = {}
+        try:
+            from db.postgres_db import get_connection
+
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT rag_document_key, product_name FROM products "
+                "WHERE rag_document_key IS NOT NULL"
+            )
+            for key, name in cursor.fetchall():
+                if key and name:
+                    _PRODUCT_NAME_MAP[str(key).strip()] = str(name).strip()
+            cursor.close()
+            conn.close()
+        except Exception:
+            _PRODUCT_NAME_MAP = {}
+    return _PRODUCT_NAME_MAP
+
+
+_PRODUCT_DETAIL_MAP: dict[str, dict] | None = None
+
+
+def _normalize_product_key(name: str) -> str:
+    return "".join(str(name or "").lower().split())
+
+
+def get_product_detail_map() -> dict[str, dict]:
+    """정규화된 상품명 → products 테이블 정형 필드 매핑을 1회 로드한다.
+
+    RAG 자유텍스트에서 금액·금리·기간을 정규식으로 뽑던 취약점(예: '9만원'을 9원으로 오인)을
+    근본 차단하기 위해, 다운스트림(eligibility/financial/recommend)이 신뢰할 수 있는
+    정형 값을 상품 후보에 주입하는 용도다. DB 접근 실패 시 빈 맵으로 degrade한다.
+    """
+    global _PRODUCT_DETAIL_MAP
+    if _PRODUCT_DETAIL_MAP is None:
+        _PRODUCT_DETAIL_MAP = {}
+        try:
+            from db.postgres_db import get_connection
+
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT product_id, product_name, product_type, min_amount, max_amount,
+                       min_period_months, max_period_months, base_rate, max_rate,
+                       age_min, age_max, is_active, rag_document_key
+                FROM products
+                """
+            )
+            cols = [d[0] for d in cursor.description]
+            for row in cursor.fetchall():
+                rec = dict(zip(cols, row))
+                name = rec.get("product_name")
+                if name:
+                    _PRODUCT_DETAIL_MAP[_normalize_product_key(name)] = rec
+            cursor.close()
+            conn.close()
+        except Exception:
+            _PRODUCT_DETAIL_MAP = {}
+    return _PRODUCT_DETAIL_MAP
+
+
+def _extract_source_stem(chunk: str) -> str:
+    """청크 헤더의 '출처: {파일명}.pdf'에서 확장자를 뗀 stem을 추출한다."""
+    match = re.search(r"출처:\s*(.+?)\.pdf", chunk)
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def _product_name_from_source(stem: str) -> str:
+    """출처 파일명 stem을 정규 상품명으로 변환한다.
+
+    1순위: products 테이블(rag_document_key) 정규명.
+    2순위: 파일명 stem에서 날짜 접미사/언더스코어/문서종류 표기를 정리한 값.
+    """
+    if not stem:
+        return ""
+
+    name_map = _get_product_name_map()
+    if stem in name_map:
+        return name_map[stem]
+
+    cleaned = re.sub(r"_?\d{4,6}$", "", stem)  # 끝의 날짜 접미사 제거 (_250901, 260402 등)
+    cleaned = re.sub(r"[ _]*(약관|상품설명서|상품설명|설명서)[ _]*", " ", cleaned)
+    cleaned = cleaned.replace("_", " ").strip()
+    return cleaned
+
+
 def _extract_product_name_from_chunk(chunk: str) -> str:
+    # 1순위: 출처 PDF 파일명 → 정규 상품명. 문서 본문을 상품명으로 잘못 잡는 문제를 근본 차단한다.
+    source_name = _product_name_from_source(_extract_source_stem(chunk))
+    if source_name:
+        return source_name
+
+    # 2순위(폴백): 본문에서 상품명처럼 보이는 줄을 휴리스틱으로 추출
     keywords = ("KB", "적금", "예금", "통장", "청년", "군인")
 
     for line in chunk.splitlines():

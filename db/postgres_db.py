@@ -49,6 +49,28 @@ DB_SCHEMA = """
 | available_monthly_saving | INT | 월 가용 저축액 |
 | updated_at | DATE | 정보 갱신일 |
 
+### 2. products (상품 정보)
+※ 상품의 약관/가입요건 상세는 RAG로 조회한다. 이 테이블은 주로 customer_accounts와 JOIN하여 고객이 보유한 상품명을 표시할 때 사용한다.
+| 컬럼 | 타입 | 설명 |
+|---|---|---|
+| product_id | INT (PK) | 상품 고유 ID |
+| product_name | VARCHAR(100) | 상품명 (예: KB Star 정기예금) |
+| product_type | VARCHAR(20) | 상품 유형 (예금/적금) |
+| join_channel | VARCHAR(100) | 가입 채널 |
+| min_amount | BIGINT | 최소 가입금액(원) |
+| max_amount | BIGINT | 최대 가입금액(원, NULL 가능) |
+| min_period_months | INT | 최소 가입기간(개월) |
+| max_period_months | INT | 최대 가입기간(개월) |
+| partial_withdrawal_yn | BOOLEAN | 부분 출금 가능 여부 |
+| auto_redeposit_yn | BOOLEAN | 자동 재예치 여부 |
+| additional_deposit_yn | BOOLEAN | 추가 납입 가능 여부 |
+| is_active | BOOLEAN | 판매 중 여부 |
+| base_rate | NUMERIC(5,2) | 기본 금리(%) |
+| max_rate | NUMERIC(5,2) | 최대 우대 금리(%) |
+| age_min | INT | 가입 최소 나이 |
+| age_max | INT | 가입 최대 나이(NULL 가능) |
+| rag_document_key | VARCHAR(100) | 약관 RAG 문서 키 |
+
 ### 3. customer_accounts (고객 계좌)
 | 컬럼 | 타입 | 설명 |
 |---|---|---|

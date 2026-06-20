@@ -3,6 +3,7 @@ Customer Agent - 고객 기본 정보, 가입 계좌, 납입 이력 조회 전�
 """
 
 import re
+from datetime import date
 from typing import Any
 
 from langchain_core.messages import AIMessage
@@ -132,7 +133,12 @@ def customer_agent_node(state: AgentState) -> dict:
                 ) as evaluation_observation:
                     tool_results, tool_errors = _run_required_customer_lookups(customer_name)
                     summary = _build_lookup_summary(customer_name, tool_results)
-                    customer_profile = _extract_customer_profile(tool_results)
+                    # DB의 정형 고객 데이터를 직접 읽어 신뢰할 수 있는 프로필을 만든다.
+                    # NL2SQL 텍스트 표 파싱은 income/월저축액 등을 자주 누락하므로 1순위로 DB 정형 조회를 쓰고,
+                    # 실패 시에만 기존 텍스트 파싱으로 폴백한다.
+                    customer_profile = _build_structured_profile_from_db(customer_id)
+                    if not customer_profile:
+                        customer_profile = _extract_customer_profile(tool_results)
                     update_observation(
                         evaluation_observation,
                         output={
@@ -216,3 +222,70 @@ def _extract_customer_profile(tool_results: list[dict[str, Any]]) -> dict[str, A
             continue
         return parse_customer_profile(item.get("tool_result"))
     return {}
+
+
+def _build_structured_profile_from_db(customer_id: int) -> dict[str, Any]:
+    """customers 테이블에서 정형 고객 프로필을 직접 구성한다.
+
+    eligibility가 기대하는 필드(age/job/income/monthly_saving_amount/
+    salary_transfer/auto_transfer/card_usage/main_bank)를 DB 값으로 채워,
+    NL2SQL 텍스트 파싱에서 누락되던 소득·월저축액 문제를 근본 차단한다.
+    DB 접근 실패 시 빈 dict를 반환해 호출부가 텍스트 파싱으로 폴백하게 한다.
+    """
+    try:
+        from db.postgres_db import get_connection
+
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT customer_name, birth_date, customer_job, annual_income, income_level,
+                   main_bank_yn, salary_transfer_yn, auto_transfer_yn, card_usage_yn,
+                   marketing_agree_yn, transaction_months, available_monthly_saving
+            FROM customers WHERE customer_id = %s
+            """,
+            (customer_id,),
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+    except Exception:
+        return {}
+
+    if not row:
+        return {}
+
+    (
+        customer_name, birth_date, customer_job, annual_income, income_level,
+        main_bank_yn, salary_transfer_yn, auto_transfer_yn, card_usage_yn,
+        marketing_agree_yn, transaction_months, available_monthly_saving,
+    ) = row
+
+    age = None
+    if birth_date is not None:
+        try:
+            today = date.today()
+            age = today.year - birth_date.year - (
+                (today.month, today.day) < (birth_date.month, birth_date.day)
+            )
+        except AttributeError:
+            age = None
+
+    # annual_income는 만원 단위 → 원 단위로 환산
+    income_won = int(annual_income) * 10000 if annual_income is not None else None
+
+    return {
+        "customer_name": customer_name,
+        "age": age,
+        "job": customer_job,
+        "income": income_won,
+        "income_level": income_level,
+        "monthly_saving_amount": int(available_monthly_saving) if available_monthly_saving is not None else None,
+        "salary_transfer": bool(salary_transfer_yn),
+        "auto_transfer": bool(auto_transfer_yn),
+        "card_usage": bool(card_usage_yn),
+        "main_bank": bool(main_bank_yn),
+        "marketing_agree": bool(marketing_agree_yn),
+        "transaction_months": transaction_months,
+        "raw_text": "",
+    }

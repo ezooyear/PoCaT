@@ -698,30 +698,47 @@ def _get_validation_payload(validation_result: Any) -> dict[str, Any]:
     return validation_result
 
 
+# 추천을 하드 차단해야 하는 "구체적 안전 위반" 이슈 타입만 지정한다.
+# 그 외(RAG confidence 낮음, '검증 미수행', 약관 확인 권고 등)는 경고로 보고
+# 추천을 막지 않고 최종 답변에 주의사항으로 노출한다.
+_BLOCKING_ISSUE_TYPES = {
+    "calculation_mismatch",
+    "inappropriate_recommendation",
+}
+
+
 def _is_validation_failed(validation_result: Any) -> bool:
     """
-    Validation이 실패했는지 판단합니다.
-    실패면 Supervisor가 확정 추천 답변을 생성하지 못하게 막습니다.
+    Validation 실패로 '확정 추천을 보류'해야 하는지 판단합니다.
+
+    과거에는 revision_required(경고 수준)만으로도 추천을 통째로 막아,
+    LLM 검증이 사소한 경고 하나만 달아도 사용자가 추천을 전혀 받지 못했습니다(R4).
+    이제는 다음 두 경우에만 하드 차단합니다:
+      1) 사용자가 실제로 추가 입력을 줘야 하는 경우(missing_fields)
+      2) 구체적 안전 위반(계산 불일치/부적절 추천/조건 충돌 등) error 이슈가 있는 경우
+    그 외 경고는 차단하지 않고 주의사항으로 최종 답변에 반영합니다.
     """
     if not isinstance(validation_result, dict):
         return False
 
     payload = _get_validation_payload(validation_result)
 
-    if validation_result.get("status") == "failed":
+    # 1) 사용자 입력이 실제로 부족하면 보류하고 추가 정보를 요청한다.
+    if payload.get("missing_fields"):
         return True
 
-    if payload.get("is_valid") is False:
-        return True
-
-    if payload.get("revision_required") is True:
-        return True
-
+    # 2) 구체적 안전 위반(error 레벨 + 차단 대상 타입)만 하드 차단한다.
+    issues = list(payload.get("issues") or [])
     verify_result = payload.get("verify_result")
     if isinstance(verify_result, dict):
-        if verify_result.get("is_valid") is False:
-            return True
-        if verify_result.get("revision_required") is True:
+        issues.extend(verify_result.get("issues") or [])
+
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        level = str(issue.get("level") or "").lower()
+        issue_type = issue.get("type")
+        if level == "error" and issue_type in _BLOCKING_ISSUE_TYPES:
             return True
 
     return False

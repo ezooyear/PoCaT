@@ -35,7 +35,7 @@ def clear_blocking_proxy() -> None:
 clear_blocking_proxy()
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b:free")
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-v4-flash")
 
 
 def get_llm(model: str = None, temperature: float = 0):
