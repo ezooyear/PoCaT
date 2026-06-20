@@ -2,13 +2,14 @@
 Shared agent execution utilities.
 """
 
+import time
 from typing import Any, Optional
 
 from langchain_core.messages import SystemMessage, ToolMessage
 
 from config.settings import get_llm
 from graph.state import AgentState
-from observability.langfuse import langfuse_observation, update_observation
+from observability.langfuse import langfuse_observation, update_observation, safe_jsonable
 
 
 def make_agent_result(
@@ -62,104 +63,149 @@ def run_agent_loop(
     prev_context_intro: str = "이전 단계에서 확인한 정보",
     prev_context_labels: Optional[dict] = None,
     prev_context_suffix: str = "",
+    span_name: Optional[str] = None,
 ) -> dict:
+    effective_span_name = span_name or output_key
+    start_time = time.time()
+
+    user_query = str(state.get("user_query") or "")
+    current_step = (state.get("current_step") or 0) + 1
+
     with langfuse_observation(
-        name=output_key,
+        name=effective_span_name,
         as_type="span",
         input={
+            "agent_name": output_key,
             "result_key": result_key,
             "max_iterations": max_iterations,
             "message_count": len(state.get("messages") or []),
+            "input_preview": user_query[:300],
         },
-        metadata={"agent": output_key},
+        metadata={
+            "agent_name": output_key,
+            "span_name": effective_span_name,
+            "current_step": current_step,
+            "result_key": result_key,
+            "status": "running",
+            "plan": safe_jsonable(state.get("plan") or []),
+            "completed_agents": list(state.get("completed_agents") or []),
+        },
     ) as observation:
-        llm = get_llm()
-        llm_with_tools = llm.bind_tools(tools)
-
-        prev = build_prev_context(
-            state.get("agent_outputs") or {},
-            intro=prev_context_intro,
-            label_map=prev_context_labels,
-        )
-
-        if prev_context_suffix and prev:
-            prev += f"\n{prev_context_suffix}"
-
-        prompt = system_prompt + prev if prev else system_prompt
-        messages = [SystemMessage(content=prompt)] + list(state.get("messages") or [])
-
-        tool_results = []
-        tool_errors = []
+        status = "error"
+        error = None
+        summary = ""
+        tool_results: list = []
+        tool_errors: list = []
         response = None
+        structured_result: dict[str, Any] = {}
 
-        for _ in range(max_iterations):
-            response = llm_with_tools.invoke(messages)
-            messages.append(response)
+        try:
+            llm = get_llm()
+            llm_with_tools = llm.bind_tools(tools)
 
-            if not response.tool_calls:
-                break
+            prev = build_prev_context(
+                state.get("agent_outputs") or {},
+                intro=prev_context_intro,
+                label_map=prev_context_labels,
+            )
 
-            tool_map = {tool.name: tool for tool in tools}
+            if prev_context_suffix and prev:
+                prev += f"\n{prev_context_suffix}"
 
-            for tool_call in response.tool_calls:
-                tool_name = tool_call["name"]
-                tool_args = tool_call["args"]
+            prompt = system_prompt + prev if prev else system_prompt
+            messages = [SystemMessage(content=prompt)] + list(state.get("messages") or [])
 
-                try:
-                    if tool_name in tool_map:
-                        result = tool_map[tool_name].invoke(tool_args)
-                    else:
-                        result = f"Unknown tool: {tool_name}"
+            for _ in range(max_iterations):
+                response = llm_with_tools.invoke(messages)
+                messages.append(response)
+
+                if not response.tool_calls:
+                    break
+
+                tool_map = {tool.name: tool for tool in tools}
+
+                for tool_call in response.tool_calls:
+                    tool_name = tool_call["name"]
+                    tool_args = tool_call["args"]
+
+                    try:
+                        if tool_name in tool_map:
+                            result = tool_map[tool_name].invoke(tool_args)
+                        else:
+                            result = f"Unknown tool: {tool_name}"
+                            tool_errors.append(result)
+                    except Exception as tool_exc:
+                        result = f"Tool execution error: {tool_exc}"
                         tool_errors.append(result)
-                except Exception as error:
-                    result = f"Tool execution error: {error}"
-                    tool_errors.append(result)
 
-                tool_result_record = {
-                    "tool_name": tool_name,
-                    "tool_args": tool_args,
-                    "tool_result": result,
-                }
-                tool_results.append(tool_result_record)
+                    tool_result_record = {
+                        "tool_name": tool_name,
+                        "tool_args": tool_args,
+                        "tool_result": result,
+                    }
+                    tool_results.append(tool_result_record)
 
-                messages.append(
-                    ToolMessage(
-                        content=str(result),
-                        tool_call_id=tool_call["id"],
+                    messages.append(
+                        ToolMessage(
+                            content=str(result),
+                            tool_call_id=tool_call["id"],
+                        )
                     )
-                )
-        else:
-            response = llm.invoke(messages)
+            else:
+                response = llm.invoke(messages)
 
-        summary = response.content if response else ""
-        status = "failed" if tool_errors else "success"
-        error = "\n".join(tool_errors) if tool_errors else None
+            summary = response.content if response else ""
+            status = "failed" if tool_errors else "success"
+            error = "\n".join(tool_errors) if tool_errors else None
 
-        structured_result = make_agent_result(
-            status=status,
-            result={
-                "summary": summary,
-                "tool_results": tool_results,
-            },
-            evidence=tool_results,
-            error=error,
-        )
+            structured_result = make_agent_result(
+                status=status,
+                result={
+                    "summary": summary,
+                    "tool_results": tool_results,
+                },
+                evidence=tool_results,
+                error=error,
+            )
 
-        update_observation(
-            observation,
-            output={
-                "status": status,
-                "summary_preview": summary[:500] if isinstance(summary, str) else str(summary)[:500],
-                "tool_count": len(tool_results),
-                "tool_names": [item.get("tool_name") for item in tool_results[:10]],
-                "tool_error_count": len(tool_errors),
-            },
-            metadata={
-                "agent": output_key,
-                "status": status,
-                "has_tool_errors": bool(tool_errors),
-            },
-        )
+        except Exception as exc:
+            status = "error"
+            error = str(exc)
+            structured_result = make_agent_result(
+                status="error",
+                result={"summary": "", "tool_results": tool_results},
+                evidence=tool_results,
+                error=error,
+            )
+            raise
+
+        finally:
+            duration_ms = int((time.time() - start_time) * 1000)
+            update_observation(
+                observation,
+                output={
+                    "status": status,
+                    "summary_preview": summary[:500],
+                    "tool_count": len(tool_results),
+                    "tool_names": [item.get("tool_name") for item in tool_results[:10]],
+                    "tool_error_count": len(tool_errors),
+                    "duration_ms": duration_ms,
+                },
+                metadata={
+                    "agent_name": output_key,
+                    "span_name": effective_span_name,
+                    "current_step": current_step,
+                    "result_key": result_key,
+                    "status": status,
+                    "error": error,
+                    "plan": safe_jsonable(state.get("plan") or []),
+                    "completed_agents": list(state.get("completed_agents") or []),
+                    "input_preview": user_query[:200],
+                    "output_preview": summary[:200],
+                    "duration_ms": duration_ms,
+                    "has_tool_errors": bool(tool_errors),
+                },
+            )
 
     outputs = dict(state.get("agent_outputs") or {})
     outputs[output_key] = structured_result
@@ -169,7 +215,7 @@ def run_agent_loop(
         completed_agents.append(output_key)
 
     return_data = {
-        "messages": [response],
+        "messages": [response] if response else [],
         "agent_outputs": outputs,
         "current_step": (state.get("current_step") or 0) + 1,
         "current_agent": output_key,

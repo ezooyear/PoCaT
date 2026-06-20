@@ -1,6 +1,8 @@
 """
 Recommend agent.
 """
+import time
+
 from langchain_core.messages import AIMessage
 
 from agents.base import make_agent_result
@@ -12,118 +14,191 @@ from agents.recommend.tools import (
     parse_financial_results,
 )
 from graph.state import AgentState
-from observability.langfuse import langfuse_observation, update_observation
+from observability.langfuse import langfuse_observation, update_observation, safe_jsonable
 
 
 def recommend_agent_node(state: AgentState) -> dict:
+    start_time = time.time()
+
     with langfuse_observation(
         name="recommend_agent",
         as_type="span",
-        input={"task_type": state.get("task_type")},
-        metadata={"agent": "recommend_agent"},
+        input={
+            "task_type": state.get("task_type"),
+            "user_query": str(state.get("user_query") or "")[:200],
+        },
+        metadata={
+            "agent_name": "recommend_agent",
+            "current_step": (state.get("current_step") or 0) + 1,
+            "result_key": "recommend_result",
+            "status": "running",
+            "plan": safe_jsonable(state.get("plan") or []),
+            "completed_agents": list(state.get("completed_agents") or []),
+        },
     ) as observation:
-        agent_outputs = dict(state.get("agent_outputs") or {})
+        status = "error"
+        summary = ""
+        fallback_reason = None
+        recommendations: list = []
+        financial_results: list = []
+        eligible_product_count = 0
+        financial_calculation_count = 0
+        recommend_result: dict = {}
+        classified: dict = {"recommendable": [], "needs_check": [], "rejected": []}
 
-        eligibility_results = state.get("eligibility_results") or []
-        if not eligibility_results:
-            eligibility_result = state.get("eligibility_result") or {}
-            if isinstance(eligibility_result, dict):
-                payload = eligibility_result.get("result", {})
-                if isinstance(payload, dict):
-                    eligibility_results = payload.get("results") or []
+        try:
+            agent_outputs = dict(state.get("agent_outputs") or {})
 
-        financial_results = state.get("financial_results")
-        if financial_results is None:
-            financial_result = state.get("financial_result")
-            if financial_result:
-                if isinstance(financial_result, dict):
-                    payload = financial_result.get("result", {})
-                    tool_results = payload.get("tool_results", []) if isinstance(payload, dict) else []
-                    extracted_results = []
+            eligibility_results = state.get("eligibility_results") or []
+            if not eligibility_results:
+                eligibility_result = state.get("eligibility_result") or {}
+                if isinstance(eligibility_result, dict):
+                    payload = eligibility_result.get("result", {})
+                    if isinstance(payload, dict):
+                        eligibility_results = payload.get("results") or []
 
-                    for item in tool_results:
-                        if not isinstance(item, dict):
-                            continue
-                        tool_result = item.get("tool_result")
-                        if isinstance(tool_result, str):
-                            extracted_results.extend(parse_financial_results(tool_result))
-
-                    financial_results = extracted_results
+            financial_results = state.get("financial_results")
+            if financial_results is None:
+                financial_result = state.get("financial_result")
+                if financial_result:
+                    if isinstance(financial_result, dict):
+                        payload = financial_result.get("result", {})
+                        tool_results = (
+                            payload.get("tool_results", [])
+                            if isinstance(payload, dict)
+                            else []
+                        )
+                        extracted_results = []
+                        for item in tool_results:
+                            if not isinstance(item, dict):
+                                continue
+                            tool_result = item.get("tool_result")
+                            if isinstance(tool_result, str):
+                                extracted_results.extend(
+                                    parse_financial_results(tool_result)
+                                )
+                        financial_results = extracted_results
+                    else:
+                        financial_results = parse_financial_results(financial_result)
                 else:
-                    financial_results = parse_financial_results(financial_result)
-            else:
-                financial_agent_output = agent_outputs.get("financial_agent", "")
-                if isinstance(financial_agent_output, dict):
-                    payload = financial_agent_output.get("result", {})
-                    tool_results = payload.get("tool_results", []) if isinstance(payload, dict) else []
-                    extracted_results = []
-                    for item in tool_results:
-                        if not isinstance(item, dict):
-                            continue
-                        tool_result = item.get("tool_result")
-                        if isinstance(tool_result, str):
-                            extracted_results.extend(parse_financial_results(tool_result))
-                    financial_results = extracted_results
-                else:
-                    financial_results = parse_financial_results(financial_agent_output)
+                    financial_agent_output = agent_outputs.get("financial_agent", "")
+                    if isinstance(financial_agent_output, dict):
+                        payload = financial_agent_output.get("result", {})
+                        tool_results = (
+                            payload.get("tool_results", [])
+                            if isinstance(payload, dict)
+                            else []
+                        )
+                        extracted_results = []
+                        for item in tool_results:
+                            if not isinstance(item, dict):
+                                continue
+                            tool_result = item.get("tool_result")
+                            if isinstance(tool_result, str):
+                                extracted_results.extend(
+                                    parse_financial_results(tool_result)
+                                )
+                        financial_results = extracted_results
+                    else:
+                        financial_results = parse_financial_results(financial_agent_output)
 
-            if not isinstance(financial_results, list):
-                financial_results = parse_financial_results(financial_results)
+                if not isinstance(financial_results, list):
+                    financial_results = parse_financial_results(financial_results)
 
-        classified = classify_eligibility_results(eligibility_results)
-        recommendations = build_recommendations(classified["recommendable"], financial_results)
-        summary = build_recommendation_summary(
-            recommendations,
-            classified["needs_check"],
-            classified["rejected"],
-        )
+            if financial_results is None:
+                financial_results = []
 
-        recommend_result = make_agent_result(
-            status="success",
-            result={
-                "summary": summary,
-                "recommendations": recommendations,
-                "recommended_products": recommendations,
-                "recommendation_count": len(recommendations),
-                "needs_check_products": classified.get("needs_check", []),
-                "rejected_products": classified.get("rejected", []),
-                "financial_results": financial_results,
-            },
-            evidence=recommendations,
-            error=None,
-        )
-        agent_outputs["recommend_agent"] = recommend_result
+            classified = classify_eligibility_results(eligibility_results)
+            eligible_product_count = len(classified.get("recommendable", []))
+            financial_calculation_count = len(financial_results)
 
-        update_observation(
-            observation,
-            output={
-                "summary_preview": summary[:500],
-                "recommendation_count": len(recommendations),
-                "top_recommendations": [
-                    {
-                        "product_name": item.get("product_name"),
-                        "score": item.get("score"),
-                        "reason": (item.get("reason") or "")[:200],
-                    }
-                    for item in recommendations[:5]
-                    if isinstance(item, dict)
-                ],
-                "needs_check_products": [
-                    item.get("product_name")
-                    for item in classified.get("needs_check", [])[:5]
-                    if isinstance(item, dict)
-                ],
-                "rejected_products": [
-                    item.get("product_name")
-                    for item in classified.get("rejected", [])[:5]
-                    if isinstance(item, dict)
-                ],
-            },
-            metadata={
-                "agent": "recommend_agent",
-                "task_type": state.get("task_type"),
-            },
-        )
+            recommendations = build_recommendations(
+                classified["recommendable"], financial_results
+            )
+            summary = build_recommendation_summary(
+                recommendations,
+                classified["needs_check"],
+                classified["rejected"],
+            )
+
+            # determine fallback_reason
+            if not eligibility_results:
+                fallback_reason = "empty_product_result"
+            elif eligible_product_count == 0:
+                fallback_reason = "no_eligible_products"
+            elif not recommendations:
+                fallback_reason = "no_financial_calculations" if financial_calculation_count == 0 else "build_failed"
+
+            status = "success" if recommendations else "fallback"
+
+            recommend_result = make_agent_result(
+                status="success",
+                result={
+                    "summary": summary,
+                    "recommendations": recommendations,
+                    "recommended_products": recommendations,
+                    "recommendation_count": len(recommendations),
+                    "needs_check_products": classified.get("needs_check", []),
+                    "rejected_products": classified.get("rejected", []),
+                    "financial_results": financial_results,
+                },
+                evidence=recommendations,
+                error=None,
+            )
+            agent_outputs["recommend_agent"] = recommend_result
+
+        except Exception as exc:
+            status = "error"
+            fallback_reason = "exception"
+            recommend_result = make_agent_result(status="error", error=str(exc))
+            agent_outputs = dict(state.get("agent_outputs") or {})
+            raise
+
+        finally:
+            duration_ms = int((time.time() - start_time) * 1000)
+            update_observation(
+                observation,
+                output=safe_jsonable({
+                    "status": status,
+                    "eligible_product_count": eligible_product_count,
+                    "financial_calculation_count": financial_calculation_count,
+                    "recommendation_count": len(recommendations),
+                    "top_recommendations": [
+                        {
+                            "product_name": item.get("product_name"),
+                            "score": item.get("score"),
+                            "reason": (item.get("reason") or "")[:200],
+                        }
+                        for item in recommendations[:5]
+                        if isinstance(item, dict)
+                    ],
+                    "needs_check_products": [
+                        item.get("product_name")
+                        for item in classified.get("needs_check", [])[:5]
+                        if isinstance(item, dict)
+                    ],
+                    "rejected_products": [
+                        item.get("product_name")
+                        for item in classified.get("rejected", [])[:5]
+                        if isinstance(item, dict)
+                    ],
+                    "fallback_reason": fallback_reason,
+                    "summary_preview": summary[:300],
+                    "duration_ms": duration_ms,
+                }),
+                metadata=safe_jsonable({
+                    "agent_name": "recommend_agent",
+                    "current_step": (state.get("current_step") or 0) + 1,
+                    "result_key": "recommend_result",
+                    "status": status,
+                    "eligible_product_count": eligible_product_count,
+                    "financial_calculation_count": financial_calculation_count,
+                    "recommendation_count": len(recommendations),
+                    "fallback_reason": fallback_reason,
+                    "task_type": state.get("task_type"),
+                    "duration_ms": duration_ms,
+                }),
+            )
 
         completed_agents = list(state.get("completed_agents") or [])
         if "recommend_agent" not in completed_agents:

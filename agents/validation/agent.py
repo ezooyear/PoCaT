@@ -15,6 +15,7 @@ Validation Agent
 """
 
 import json
+import time
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -28,6 +29,7 @@ from agents.validation.tools import (
     build_rule_based_verify_result,
     run_validation_checks,
 )
+from observability.langfuse import langfuse_observation, update_observation, safe_jsonable
 
 
 # LLM 검증이 필요한 복잡한 작업만 지정합니다.
@@ -51,52 +53,137 @@ def validation_agent_node(state: AgentState) -> dict[str, Any]:
     3. 복잡한 task_type이면 LLM 기반 verify_result 생성
     4. validation_result와 agent_outputs에 저장
     """
+    start_time = time.time()
 
-    validation_context = build_validation_context(state)
+    # 사전에 has_*_result 체크 (circular ref 방지를 위해 존재 여부만)
+    has_product_result = bool(state.get("product_result"))
+    has_eligibility_result = bool(state.get("eligibility_result"))
+    has_financial_result = bool(state.get("financial_result"))
+    has_recommend_result = bool(state.get("recommend_result"))
 
-    # 1차 검증: 항상 실행
-    rule_issues, rule_checked_items = run_validation_checks(state)
-
-    # LLM 검증이 필요한 task_type인지 한 번만 판단
-    should_run_llm = _should_run_llm_validation(state)
-
-    # 2차 검증: 복잡한 task_type에서만 LLM 실행
-    if should_run_llm:
-        verify_result = _run_llm_verify_result(
-            validation_context=validation_context,
-            rule_issues=rule_issues,
-            rule_checked_items=rule_checked_items,
-        )
-    else:
-        verify_result = {}
-
-    # LLM 검증을 실행하지 않았거나, LLM 검증이 실패한 경우 rule 기반 결과만 사용
-    if not verify_result:
-        verify_result = build_rule_based_verify_result(
-            rule_issues=rule_issues,
-            rule_checked_items=rule_checked_items,
-            llm_skipped=not should_run_llm,
-        )
-
-    is_valid = bool(verify_result.get("is_valid"))
-
-    validation_result = make_agent_result(
-        status="success" if is_valid else "failed",
-        result={
-            "verify_result": verify_result,
-            "is_valid": is_valid,
-            "issues": verify_result.get("issues", []),
-            "revision_required": verify_result.get("revision_required", not is_valid),
-            "checked_items": verify_result.get("checked_items", rule_checked_items),
-            "summary": verify_result.get("summary"),
-            "final_notes": verify_result.get("final_notes", []),
+    with langfuse_observation(
+        name="validation_agent",
+        as_type="span",
+        input={
+            "task_type": state.get("task_type"),
+            "user_query": str(state.get("user_query") or "")[:200],
+            "has_product_result": has_product_result,
+            "has_eligibility_result": has_eligibility_result,
+            "has_financial_result": has_financial_result,
+            "has_recommend_result": has_recommend_result,
         },
-        evidence=[],
-        error=None if is_valid else "검증 이슈가 발견되었습니다.",
-    )
+        metadata={
+            "agent_name": "validation_agent",
+            "current_step": (state.get("current_step") or 0) + 1,
+            "result_key": "validation_result",
+            "status": "running",
+            "plan": safe_jsonable(state.get("plan") or []),
+            "completed_agents": list(state.get("completed_agents") or []),
+        },
+    ) as observation:
+        validation_status = "error"
+        failure_reasons: list[str] = []
+        is_valid = False
+        validation_result: dict = {}
 
-    agent_outputs = dict(state.get("agent_outputs") or {})
-    agent_outputs["validation_agent"] = validation_result
+        try:
+            validation_context = build_validation_context(state)
+
+            # 1차 검증: 항상 실행
+            rule_issues, rule_checked_items = run_validation_checks(state)
+
+            # LLM 검증이 필요한 task_type인지 한 번만 판단
+            should_run_llm = _should_run_llm_validation(state)
+
+            # 2차 검증: 복잡한 task_type에서만 LLM 실행
+            if should_run_llm:
+                verify_result = _run_llm_verify_result(
+                    validation_context=validation_context,
+                    rule_issues=rule_issues,
+                    rule_checked_items=rule_checked_items,
+                )
+            else:
+                verify_result = {}
+
+            # LLM 검증 실패 시 rule 기반 결과 사용
+            if not verify_result:
+                verify_result = build_rule_based_verify_result(
+                    rule_issues=rule_issues,
+                    rule_checked_items=rule_checked_items,
+                    llm_skipped=not should_run_llm,
+                )
+
+            is_valid = bool(verify_result.get("is_valid"))
+            issues = verify_result.get("issues", [])
+            failure_reasons = [
+                str(issue.get("type", "unknown"))
+                for issue in issues
+                if isinstance(issue, dict) and issue.get("level") == "error"
+            ]
+
+            validation_status = "passed" if is_valid else (
+                "passed_with_warnings"
+                if any(
+                    isinstance(i, dict) and i.get("level") == "warning"
+                    for i in issues
+                )
+                else "failed"
+            )
+
+            validation_result = make_agent_result(
+                status="success" if is_valid else "failed",
+                result={
+                    "verify_result": verify_result,
+                    "is_valid": is_valid,
+                    "issues": issues,
+                    "revision_required": verify_result.get("revision_required", not is_valid),
+                    "checked_items": verify_result.get("checked_items", rule_checked_items),
+                    "summary": verify_result.get("summary"),
+                    "final_notes": verify_result.get("final_notes", []),
+                },
+                evidence=[],
+                error=None if is_valid else "검증 이슈가 발견되었습니다.",
+            )
+
+            agent_outputs = dict(state.get("agent_outputs") or {})
+            agent_outputs["validation_agent"] = validation_result
+
+        except Exception as exc:
+            validation_status = "error"
+            failure_reasons = [f"exception:{str(exc)[:100]}"]
+            validation_result = make_agent_result(status="error", error=str(exc))
+            agent_outputs = dict(state.get("agent_outputs") or {})
+            raise
+
+        finally:
+            duration_ms = int((time.time() - start_time) * 1000)
+            update_observation(
+                observation,
+                output=safe_jsonable({
+                    "validation_status": validation_status,
+                    "is_valid": is_valid,
+                    "failure_reasons": failure_reasons,
+                    "has_product_result": has_product_result,
+                    "has_eligibility_result": has_eligibility_result,
+                    "has_financial_result": has_financial_result,
+                    "has_recommend_result": has_recommend_result,
+                    "duration_ms": duration_ms,
+                }),
+                metadata=safe_jsonable({
+                    "agent_name": "validation_agent",
+                    "current_step": (state.get("current_step") or 0) + 1,
+                    "result_key": "validation_result",
+                    "status": validation_status,
+                    "validation_status": validation_status,
+                    "failure_reasons": failure_reasons,
+                    "has_product_result": has_product_result,
+                    "has_eligibility_result": has_eligibility_result,
+                    "has_financial_result": has_financial_result,
+                    "has_recommend_result": has_recommend_result,
+                    "task_type": state.get("task_type"),
+                    "duration_ms": duration_ms,
+                }),
+            )
 
     completed_agents = list(state.get("completed_agents") or [])
     if "validation_agent" not in completed_agents:
