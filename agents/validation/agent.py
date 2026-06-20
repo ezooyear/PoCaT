@@ -29,7 +29,12 @@ from agents.validation.tools import (
     build_rule_based_verify_result,
     run_validation_checks,
 )
-from observability.langfuse import flush_langfuse, langfuse_observation, update_observation
+from observability.langfuse import (
+    flush_langfuse,
+    langfuse_observation,
+    safe_jsonable,
+    update_observation,
+)
 
 
 # LLM 검증이 필요한 복잡한 작업만 지정합니다.
@@ -254,6 +259,7 @@ def _run_llm_verify_result(
             "checked_items": rule_checked_items,
         },
     }
+    payload = safe_jsonable(payload)
 
     messages = [
         SystemMessage(content=VALIDATION_SYSTEM_PROMPT),
@@ -401,7 +407,11 @@ def _normalize_verify_result(data: dict[str, Any]) -> dict[str, Any]:
     elif has_warning_issue and status == "passed":
         status = "warning"
 
-    if has_error_issue or has_warning_issue:
+    # error 없이 warning만 있으면 경고는 남기되 유효로 처리
+    if not has_error_issue and status in ("passed", "warning"):
+        is_valid = True
+
+    if has_error_issue:
         revision_required = True
 
     if "condition_conflict" in issue_types:

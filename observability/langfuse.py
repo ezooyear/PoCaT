@@ -41,7 +41,55 @@ def _clean_metadata(metadata: Any) -> dict[str, str]:
     return cleaned
 
 
+def safe_jsonable(value: Any, *, max_depth: int = 8, _seen: set[int] | None = None) -> Any:
+    if _seen is None:
+        _seen = set()
+
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+
+    if max_depth <= 0:
+        return str(value)
+
+    object_id = id(value)
+    if object_id in _seen:
+        return "[circular]"
+
+    if isinstance(value, dict):
+        _seen.add(object_id)
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            sanitized[str(key)] = safe_jsonable(item, max_depth=max_depth - 1, _seen=_seen)
+        _seen.remove(object_id)
+        return sanitized
+
+    if isinstance(value, (list, tuple, set)):
+        _seen.add(object_id)
+        sanitized_items = [
+            safe_jsonable(item, max_depth=max_depth - 1, _seen=_seen)
+            for item in value
+        ]
+        _seen.remove(object_id)
+        return sanitized_items
+
+    if hasattr(value, "model_dump"):
+        try:
+            return safe_jsonable(value.model_dump(), max_depth=max_depth - 1, _seen=_seen)
+        except Exception:
+            return str(value)
+
+    if hasattr(value, "__dict__"):
+        try:
+            return safe_jsonable(vars(value), max_depth=max_depth - 1, _seen=_seen)
+        except Exception:
+            return str(value)
+
+    return str(value)
+
+
 def summarize_for_langfuse(value: Any, *, max_length: int = 800) -> Any:
+    value = safe_jsonable(value)
+
     if value is None:
         return None
 

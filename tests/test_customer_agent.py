@@ -1,5 +1,18 @@
 import unittest
+import sys
+import types
 from unittest.mock import patch
+
+mcp_module = types.ModuleType("mcp")
+mcp_module.ClientSession = object
+mcp_module.types = types.SimpleNamespace()
+client_module = types.ModuleType("mcp.client")
+streamable_http_module = types.ModuleType("mcp.client.streamable_http")
+streamable_http_module.streamable_http_client = object()
+
+sys.modules.setdefault("mcp", mcp_module)
+sys.modules.setdefault("mcp.client", client_module)
+sys.modules.setdefault("mcp.client.streamable_http", streamable_http_module)
 
 from agents.customer import agent as customer_agent
 

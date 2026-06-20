@@ -4,6 +4,7 @@ Recommend agent.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from langchain_core.messages import AIMessage
@@ -35,7 +36,7 @@ def recommend_agent_node(state: AgentState) -> dict:
 
             eligibility_results = _load_eligibility_results(state)
             product_candidates = _load_product_candidates(state, agent_outputs)
-            financial_results = _load_financial_results(state, agent_outputs)
+            financial_results, financial_calculation_source = _load_financial_results(state, agent_outputs)
 
             with langfuse_observation(
                 name="recommend_agent.prepare_context",
@@ -44,6 +45,7 @@ def recommend_agent_node(state: AgentState) -> dict:
                     "eligibility_result_count": len(eligibility_results or []),
                     "product_candidate_count": len(product_candidates or []),
                     "financial_result_count": len(financial_results or []),
+                    "financial_calculation_source": financial_calculation_source,
                 },
                 metadata={"agent": "recommend_agent", "step": "prepare_context"},
             ) as step_observation:
@@ -53,12 +55,13 @@ def recommend_agent_node(state: AgentState) -> dict:
                         "eligibility_preview": eligibility_results[:5] if isinstance(eligibility_results, list) else eligibility_results,
                         "product_candidates_preview": product_candidates[:5] if isinstance(product_candidates, list) else product_candidates,
                         "financial_preview": financial_results[:5] if isinstance(financial_results, list) else financial_results,
+                        "financial_calculation_source": financial_calculation_source,
                     },
                     metadata={"agent": "recommend_agent"},
                 )
 
             normalized_results = _normalize_eligibility_results(eligibility_results)
-            recommendations, excluded_products, status, fallback_reason, required_next_steps = _build_guarded_recommendations(
+            recommendations, excluded_products, status, fallback_reason, required_next_steps, matched_products = _build_guarded_recommendations(
                 normalized_results=normalized_results,
                 product_candidates=product_candidates,
                 financial_results=financial_results,
@@ -83,6 +86,12 @@ def recommend_agent_node(state: AgentState) -> dict:
                     "fallback_reason": fallback_reason,
                     "required_next_steps": required_next_steps,
                     "financial_results": financial_results,
+                    "financial_calculation_source": financial_calculation_source,
+                    "financial_calculation_count": len(financial_results),
+                    "financial_calculation_product_names": [
+                        item.get("product_name") for item in financial_results if isinstance(item, dict)
+                    ],
+                    "matched_products": matched_products,
                     "source_agent": "recommend_agent",
                 },
                 evidence=recommendations,
@@ -114,6 +123,12 @@ def recommend_agent_node(state: AgentState) -> dict:
                     "task_type": state.get("task_type"),
                     "status": status,
                     "fallback_reason": fallback_reason,
+                    "financial_calculation_source": financial_calculation_source,
+                    "financial_calculation_count": len(financial_results),
+                    "financial_calculation_product_names": ",".join(
+                        item.get("product_name", "") for item in financial_results if isinstance(item, dict)
+                    )[:500] or None,
+                    "matched_product_count": len(matched_products),
                 },
             )
 
@@ -191,19 +206,42 @@ def _load_product_candidates(state: AgentState, agent_outputs: dict) -> list[dic
     return []
 
 
-def _load_financial_results(state: AgentState, agent_outputs: dict) -> list[dict]:
+def _load_financial_results(state: AgentState, agent_outputs: dict) -> tuple[list[dict], str]:
+    """financial 계산 결과를 로드하고 (results, source) 튜플 반환."""
     financial_results = state.get("financial_results")
-    if isinstance(financial_results, list):
-        return financial_results
+    if isinstance(financial_results, list) and financial_results:
+        return financial_results, "state.financial_results"
 
     financial_result = state.get("financial_result")
     if financial_result:
+        calcs = _extract_calculations(financial_result)
+        if calcs:
+            return calcs, "financial_result.calculations"
         extracted = _extract_financial_results_from_container(financial_result)
         if extracted:
-            return extracted
+            return extracted, "financial_result.tool_results"
 
-    financial_agent_output = agent_outputs.get("financial_agent", "")
-    return _extract_financial_results_from_container(financial_agent_output)
+    financial_agent_output = agent_outputs.get("financial_agent") or {}
+    calcs = _extract_calculations(financial_agent_output)
+    if calcs:
+        return calcs, "agent_outputs.financial_agent.calculations"
+    extracted = _extract_financial_results_from_container(financial_agent_output)
+    return extracted, "agent_outputs.financial_agent.tool_results" if extracted else "missing"
+
+
+def _extract_calculations(container: Any) -> list[dict]:
+    """financial_result 또는 agent_output에서 structured calculations를 추출한다."""
+    if not isinstance(container, dict):
+        return []
+    calcs = container.get("calculations")
+    if isinstance(calcs, list) and calcs:
+        return calcs
+    payload = container.get("result", {})
+    if isinstance(payload, dict):
+        calcs = payload.get("calculations")
+        if isinstance(calcs, list) and calcs:
+            return calcs
+    return []
 
 
 def _extract_financial_results_from_container(container: Any) -> list[dict]:
@@ -259,25 +297,23 @@ def _build_guarded_recommendations(
     normalized_results: list[dict],
     product_candidates: list[dict],
     financial_results: list[dict],
-) -> tuple[list[dict], list[dict], str, str | None, list[str]]:
+) -> tuple[list[dict], list[dict], str, str | None, list[str], list[dict]]:
     """
     앞단 결과가 부실할 때 확정 추천을 막고 안전한 fallback 상태를 만든다.
+    Returns: (recommendations, excluded_products, status, fallback_reason, required_next_steps, matched_products)
     """
 
     excluded_products = _build_excluded_products(normalized_results)
+    matched_products: list[dict] = []
 
     if not normalized_results:
-        # eligibility 결과가 없는데 추천을 생성하면 가입 가능 여부를 recommend가 대신 판단하게 되므로
-        # needs_more_info로 멈추고 앞단 정보 보완을 요구합니다.
-        return [], excluded_products, "needs_more_info", "eligibility_results_missing", ["eligibility_results 확인"]
+        return [], excluded_products, "needs_more_info", "eligibility_results_missing", ["eligibility_results 확인"], []
 
     if not product_candidates:
-        return [], excluded_products, "needs_more_info", "product_candidates_missing", ["product_agent 결과 확인"]
+        return [], excluded_products, "needs_more_info", "product_candidates_missing", ["product_agent 결과 확인"], []
 
     if not financial_results:
-        # 금융 계산 근거가 없으면 금액 기반 확정 추천이 오해를 만들 수 있으므로
-        # recommendation_deferred로 낮춰서 후속 계산을 기다립니다.
-        return [], excluded_products, "recommendation_deferred", "financial_results_missing", ["financial_agent 결과 확인"]
+        return [], excluded_products, "recommendation_deferred", "financial_results_missing", ["financial_agent 결과 확인"], []
 
     eligible_results = [
         item
@@ -286,53 +322,93 @@ def _build_guarded_recommendations(
     ]
 
     if not eligible_results:
-        return [], excluded_products, "no_eligible_product", "no_eligible_product", ["고객 조건 또는 상품 조건 재확인"]
+        return [], excluded_products, "no_eligible_product", "no_eligible_product", ["고객 조건 또는 상품 조건 재확인"], []
 
-    valid_candidate_names = {
-        _normalize_name(candidate.get("product_name", ""))
-        for candidate in product_candidates
-        if _is_valid_product_name(candidate.get("product_name", ""))
-    }
+    # 상품 후보 이름 집합 (정규화 + alias)
+    valid_candidate_name_map = _build_candidate_name_map(product_candidates)
+
+    # financial 결과 이름 집합 (정규화 + alias)
+    financial_name_map = _build_financial_name_map(financial_results)
 
     filtered_eligible_results = []
     for item in eligible_results:
-        normalized_name = _normalize_name(item.get("product_name", ""))
+        product_name = item.get("product_name", "미확인 상품")
+        norm = _normalize_name(product_name)
+        alias = _name_alias(product_name)
 
-        # 상품 후보 목록에 없는 이름을 추천하면 product parsing 오류가 추천 결과로 이어질 수 있으므로
-        # 실제 product_candidate와 매칭되는 이름만 추천 대상으로 남깁니다.
-        if normalized_name not in valid_candidate_names:
-            excluded_products.append(
-                {
-                    "product_name": item.get("product_name", "미확인 상품"),
-                    "status": "invalid_product",
-                    "reason": "상품 후보와 매칭되지 않는 이름이라 추천에서 제외했습니다.",
-                    "source_agent": "recommend_agent",
-                }
-            )
+        has_candidate = norm in valid_candidate_name_map or alias in valid_candidate_name_map
+        has_financial = norm in financial_name_map or alias in financial_name_map
+
+        if not has_candidate:
+            excluded_products.append({
+                "product_name": product_name,
+                "status": "invalid_product",
+                "reason": "상품 후보와 매칭되지 않는 이름이라 추천에서 제외했습니다.",
+                "source_agent": "recommend_agent",
+            })
             continue
 
-        if not _is_valid_product_name(item.get("product_name", "")):
-            excluded_products.append(
-                {
-                    "product_name": item.get("product_name", "미확인 상품"),
-                    "status": "invalid_product",
-                    "reason": "비정상 상품명으로 보여 추천에서 제외했습니다.",
-                    "source_agent": "recommend_agent",
-                }
-            )
+        if not _is_valid_product_name(product_name):
+            excluded_products.append({
+                "product_name": product_name,
+                "status": "invalid_product",
+                "reason": "비정상 상품명으로 보여 추천에서 제외했습니다.",
+                "source_agent": "recommend_agent",
+            })
             continue
 
+        matched_products.append({
+            "product_name": product_name,
+            "eligibility_status": item.get("status"),
+            "has_financial_calculation": has_financial,
+        })
         filtered_eligible_results.append(item)
 
     if not filtered_eligible_results:
-        return [], excluded_products, "no_eligible_product", "no_valid_eligible_product", ["product_agent 결과 정제 확인"]
+        return [], excluded_products, "no_eligible_product", "no_valid_eligible_product", ["product_agent 결과 정제 확인"], matched_products
 
     recommendations = build_recommendations(filtered_eligible_results, financial_results)
 
     if not recommendations:
-        return [], excluded_products, "recommendation_deferred", "recommendation_build_failed", ["financial_result 파싱 결과 확인"]
+        return [], excluded_products, "recommendation_deferred", "recommendation_build_failed", ["financial_result 파싱 결과 확인"], matched_products
 
-    return recommendations, _dedupe_excluded_products(excluded_products), "recommended", None, []
+    return recommendations, _dedupe_excluded_products(excluded_products), "recommended", None, [], matched_products
+
+
+def _build_candidate_name_map(product_candidates: list[dict]) -> dict[str, str]:
+    """product_name → original_name 매핑 (정규화 + alias 포함)"""
+    result: dict[str, str] = {}
+    for c in product_candidates:
+        name = c.get("product_name", "")
+        if not _is_valid_product_name(name):
+            continue
+        result[_normalize_name(name)] = name
+        alias = _name_alias(name)
+        if alias:
+            result[alias] = name
+    return result
+
+
+def _build_financial_name_map(financial_results: list[dict]) -> dict[str, str]:
+    """financial product_name → original_name 매핑 (정규화 + alias 포함)"""
+    result: dict[str, str] = {}
+    for f in financial_results:
+        if not isinstance(f, dict):
+            continue
+        name = f.get("product_name", "")
+        if not name:
+            continue
+        result[_normalize_name(name)] = name
+        alias = _name_alias(name)
+        if alias:
+            result[alias] = name
+    return result
+
+
+def _name_alias(name: str) -> str:
+    """괄호 안 설명 제거한 alias 생성"""
+    alias = re.sub(r"\([^)]*\)", "", str(name or ""))
+    return _normalize_name(alias)
 
 
 def _build_excluded_products(normalized_results: list[dict]) -> list[dict]:

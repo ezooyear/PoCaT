@@ -29,8 +29,10 @@ def financial_agent_node(state: AgentState) -> dict:
         result = _augment_switch_analysis_result(state, result)
 
     result = _augment_maturity_estimate_result(state, result)
+    result = _enforce_financial_role_boundary(result)
+    result = _augment_recommendation_calculations(state, result)
 
-    return _enforce_financial_role_boundary(result)
+    return result
 
 
 def _augment_maturity_estimate_result(state: AgentState, result: dict) -> dict:
@@ -306,6 +308,196 @@ def _format_maturity_estimate(estimate: dict[str, Any]) -> str:
 
 def _format_won(value: Any) -> str:
     return f"{float(value):,.0f}원"
+
+
+def _augment_recommendation_calculations(state: AgentState, result: dict) -> dict:
+    """recommendation 태스크에서 eligible 상품별 구조화된 계산값을 financial_result에 추가한다."""
+    if str(state.get("task_type") or "") != "recommendation":
+        return result
+
+    financial_result = result.get("financial_result")
+    if not isinstance(financial_result, dict):
+        return result
+
+    # 이미 calculations가 있으면 중복 추가하지 않음
+    payload = financial_result.get("result", {})
+    if isinstance(payload, dict) and isinstance(payload.get("calculations"), list) and payload["calculations"]:
+        return result
+
+    eligible_products = _extract_eligible_products(state)
+    if not eligible_products:
+        return result
+
+    product_map = _build_product_map(state)
+    monthly_amount = _extract_monthly_saving_amount(state)
+
+    calculations = []
+    for ep in eligible_products:
+        if not isinstance(ep, dict):
+            continue
+        product_name = str(ep.get("product_name") or "").strip()
+        if not product_name:
+            continue
+
+        product = _find_matching_product(product_name, product_map)
+        calc = _compute_product_estimate(product_name, product, monthly_amount)
+        if calc:
+            calculations.append(calc)
+
+    if not calculations:
+        return result
+
+    if not isinstance(payload, dict):
+        payload = {}
+
+    payload["calculations"] = calculations
+    payload["financial_calculation_count"] = len(calculations)
+    payload["financial_calculation_product_names"] = [c["product_name"] for c in calculations]
+    financial_result["result"] = payload
+    financial_result["calculations"] = calculations
+    financial_result["financial_calculation_count"] = len(calculations)
+    financial_result["financial_calculation_product_names"] = [c["product_name"] for c in calculations]
+    result["financial_result"] = financial_result
+
+    agent_outputs = dict(result.get("agent_outputs") or {})
+    if isinstance(agent_outputs.get("financial_agent"), dict):
+        agent_outputs["financial_agent"]["result"] = payload
+        agent_outputs["financial_agent"]["calculations"] = calculations
+        agent_outputs["financial_agent"]["financial_calculation_count"] = len(calculations)
+        agent_outputs["financial_agent"]["financial_calculation_product_names"] = [
+            c["product_name"] for c in calculations
+        ]
+    result["agent_outputs"] = agent_outputs
+
+    return result
+
+
+def _extract_eligible_products(state: AgentState) -> list[dict]:
+    eligibility_result = state.get("eligibility_result") or {}
+    if not isinstance(eligibility_result, dict):
+        return []
+    payload = eligibility_result.get("result", {})
+    if not isinstance(payload, dict):
+        return []
+    return list(payload.get("eligible_products") or [])
+
+
+def _build_product_map(state: AgentState) -> dict[str, dict]:
+    product_result = state.get("product_result") or {}
+    products: list[dict] = []
+    if isinstance(product_result, dict):
+        products = (
+            product_result.get("products")
+            or (product_result.get("result") or {}).get("products")
+            or []
+        )
+    return {
+        _norm(str(p.get("product_name") or "")): p
+        for p in products
+        if isinstance(p, dict) and p.get("product_name")
+    }
+
+
+def _extract_monthly_saving_amount(state: AgentState) -> int:
+    customer_profile = state.get("customer_profile") or {}
+    if not isinstance(customer_profile, dict):
+        customer_profile = {}
+    amount = customer_profile.get("monthly_saving_amount")
+    if amount:
+        return int(amount)
+
+    customer_result = state.get("customer_result") or {}
+    payload = customer_result.get("result", {}) if isinstance(customer_result, dict) else {}
+    profile = (
+        payload.get("customer_profile") or payload.get("profile") or {}
+        if isinstance(payload, dict) else {}
+    )
+    amount = profile.get("monthly_saving_amount") if isinstance(profile, dict) else None
+    return int(amount) if amount else 100000
+
+
+def _find_matching_product(product_name: str, product_map: dict[str, dict]) -> dict:
+    norm = _norm(product_name)
+    if norm in product_map:
+        return product_map[norm]
+    # 괄호 제거 alias 매칭
+    alias = re.sub(r"\([^)]*\)", "", norm).strip()
+    if alias:
+        for key, product in product_map.items():
+            key_alias = re.sub(r"\([^)]*\)", "", key).strip()
+            if alias == key_alias or key.startswith(alias) or alias.startswith(key):
+                return product
+    return {}
+
+
+def _compute_product_estimate(product_name: str, product: dict, monthly_amount: int) -> dict | None:
+    product_type = str(product.get("product_type") or "적금")
+    applied_rate = product.get("max_rate") or product.get("base_rate")
+    base_rate = product.get("base_rate")
+    term_months = _to_int(product.get("term_months")) or 12
+
+    if applied_rate is None:
+        applied_rate = 2.0
+    applied_rate = float(applied_rate)
+    base_rate_val = float(base_rate) if base_rate is not None else None
+
+    rate = applied_rate / 100
+
+    if "예금" in product_type:
+        principal = monthly_amount * term_months
+        before_tax = principal * rate * term_months / 12
+        tax = before_tax * DEFAULT_TAX_RATE
+        after_tax = before_tax - tax
+        maturity = principal + after_tax
+        return {
+            "product_name": product_name,
+            "product_type": product_type,
+            "monthly_amount": monthly_amount,
+            "term_months": term_months,
+            "payment_count": 1,
+            "principal": round(principal),
+            "applied_rate": applied_rate,
+            "base_rate": base_rate_val,
+            "bonus_rate": round(applied_rate - base_rate_val, 2) if base_rate_val is not None else None,
+            "estimated_interest_before_tax": round(before_tax),
+            "estimated_interest_after_tax": round(after_tax),
+            "estimated_maturity_amount": round(maturity),
+            "estimated_interest": round(after_tax),
+            "maturity_amount": round(maturity),
+            "calculation_method": "lump_sum_simple_estimate",
+            "calculation_note": "단리 기준 단순 추정치이며 실제 은행 계산 방식과 다를 수 있습니다.",
+        }
+    else:
+        total_payment = monthly_amount * term_months
+        before_tax = sum(
+            monthly_amount * rate * (term_months - i) / 12
+            for i in range(term_months)
+        )
+        tax = before_tax * DEFAULT_TAX_RATE
+        after_tax = before_tax - tax
+        maturity = total_payment + after_tax
+        return {
+            "product_name": product_name,
+            "product_type": product_type,
+            "monthly_amount": monthly_amount,
+            "term_months": term_months,
+            "payment_count": term_months,
+            "principal": round(total_payment),
+            "applied_rate": applied_rate,
+            "base_rate": base_rate_val,
+            "bonus_rate": round(applied_rate - base_rate_val, 2) if base_rate_val is not None else None,
+            "estimated_interest_before_tax": round(before_tax),
+            "estimated_interest_after_tax": round(after_tax),
+            "estimated_maturity_amount": round(maturity),
+            "estimated_interest": round(after_tax),
+            "maturity_amount": round(maturity),
+            "calculation_method": "monthly_installment_simple_estimate",
+            "calculation_note": "단리 기준 단순 추정치이며 실제 은행 계산 방식과 다를 수 있습니다.",
+        }
+
+
+def _norm(name: str) -> str:
+    return re.sub(r"\s+", "", str(name or "")).lower()
 
 
 def _augment_switch_analysis_result(state: AgentState, result: dict) -> dict:

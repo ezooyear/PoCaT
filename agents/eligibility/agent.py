@@ -16,10 +16,12 @@ from agents.eligibility.tools import (
     build_eligibility_summary,
     evaluate_product_eligibility,
     extract_product_candidates,
+    extract_product_candidates_from_markdown_table,
     _infer_is_soldier,
     parse_customer_accounts,
     parse_customer_profile,
 )
+from agents.product.tools import parse_korean_money
 from graph.state import AgentState
 from observability.langfuse import langfuse_observation, update_observation
 
@@ -44,6 +46,37 @@ INVALID_PRODUCT_MARKERS = [
     "판매기간",
 ]
 
+INVALID_PRODUCT_NAME_VALUES = {
+    "상품명",
+    "상품 유형",
+    "가입 대상·나이",
+    "가입·납입 금액",
+    "가입 금액",
+    "가입 가능 기간",
+    "가입 기간",
+    "기본 금리",
+    "우대 금리",
+    "최고 적용 금리",
+    "우대조건 충족 여부",
+    "추가 확인 필요",
+    "항목",
+    "내용",
+    "순위",
+}
+
+NON_PRODUCT_SECTION_NAMES = {
+    "현재 상황 요약",
+    "고객 상황 요약",
+    "상황 요약",
+    "내 계정 요약",
+    "추천 상품",
+    "추천 가능한 예·적금 상품",
+    "우대조건 현황",
+    "주의사항",
+    "추가 확인 필요",
+    "요약",
+}
+
 
 def eligibility_agent_node(state: AgentState) -> dict:
     with langfuse_observation(
@@ -59,7 +92,10 @@ def eligibility_agent_node(state: AgentState) -> dict:
 
             customer_profile = _load_customer_profile(state, customer_result, agent_outputs)
             customer_accounts = _load_customer_accounts(state, customer_result, agent_outputs)
-            product_candidates = _load_product_candidates(state, product_result, agent_outputs)
+            product_candidates, product_name_source = _load_product_candidates_with_source(
+                state, product_result, agent_outputs
+            )
+            product_candidate_source = product_name_source
             user_constraints = _extract_user_constraints(state)
             customer_profile_source = customer_profile.get("customer_profile_source", "missing")
             parsed_customer_fields = customer_profile.get("parsed_customer_fields", [])
@@ -84,6 +120,8 @@ def eligibility_agent_node(state: AgentState) -> dict:
                         "customer_profile": customer_profile,
                         "customer_accounts_preview": customer_accounts[:5] if isinstance(customer_accounts, list) else customer_accounts,
                         "product_candidates_preview": product_candidates[:5] if isinstance(product_candidates, list) else product_candidates,
+                        "product_name_source": product_name_source,
+                        "product_candidate_source": product_candidate_source,
                         "customer_profile_source": customer_profile_source,
                         "parsed_customer_fields": parsed_customer_fields,
                         "parsed_customer_values": parsed_customer_values,
@@ -103,16 +141,35 @@ def eligibility_agent_node(state: AgentState) -> dict:
                     product_candidates=product_candidates,
                     user_constraints=user_constraints,
                 )
+                invalid_product_name_source = (
+                    product_name_source
+                    if any(
+                        isinstance(item, dict) and item.get("status") == "invalid_product"
+                        for item in results
+                    )
+                    else None
+                )
                 update_observation(
                     evaluation_observation,
                     output={
                         "result_count": len(results),
                         "fallback_notes": fallback_notes,
+                        "amount_check": next(
+                            (
+                                item.get("amount_check")
+                                for item in results
+                                if isinstance(item, dict) and item.get("amount_check")
+                            ),
+                            None,
+                        ),
                         "product_names": [
                             item.get("product_name")
                             for item in results[:10]
                             if isinstance(item, dict)
                         ],
+                        "product_name_source": product_name_source,
+                        "product_candidate_source": product_candidate_source,
+                        "invalid_product_name_source": invalid_product_name_source,
                     },
                     metadata={"agent": "eligibility_agent"},
                 )
@@ -142,6 +199,9 @@ def eligibility_agent_node(state: AgentState) -> dict:
                     "customer_profile": customer_profile,
                     "customer_accounts": customer_accounts,
                     "product_candidates": product_candidates,
+                    "product_name_source": product_name_source,
+                    "product_candidate_source": product_candidate_source,
+                    "invalid_product_name_source": invalid_product_name_source,
                     "fallback_reason": fallback_reason,
                     "missing_fields": missing_fields,
                     "invalid_fields": invalid_fields,
@@ -167,6 +227,9 @@ def eligibility_agent_node(state: AgentState) -> dict:
                         "customer_profile_source": customer_profile_source,
                         "parsed_customer_fields": parsed_customer_fields,
                         "parsed_customer_values": parsed_customer_values,
+                        "product_name_source": product_name_source,
+                        "product_candidate_source": product_candidate_source,
+                        "invalid_product_name_source": invalid_product_name_source,
                         "eligible_product_names": [
                             item.get("product_name")
                             for item in grouped["eligible"][:10]
@@ -198,6 +261,14 @@ def eligibility_agent_node(state: AgentState) -> dict:
                     "customer_profile_source": customer_profile_source,
                     "parsed_customer_fields": ",".join(parsed_customer_fields[:10]) if parsed_customer_fields else None,
                     "parsed_customer_values": str(parsed_customer_values)[:500] if parsed_customer_values else None,
+                    "product_name_source": product_name_source,
+                    "product_candidate_source": product_candidate_source,
+                    "invalid_product_name_source": invalid_product_name_source,
+                    "invalid_product_name": ",".join(
+                        item.get("product_name", "")
+                        for item in results
+                        if isinstance(item, dict) and item.get("status") == "invalid_product"
+                    )[:500] or None,
                 },
             )
 
@@ -214,6 +285,9 @@ def eligibility_agent_node(state: AgentState) -> dict:
                 "customer_profile": customer_profile,
                 "customer_accounts": customer_accounts,
                 "product_candidates": product_candidates,
+                "product_name_source": product_name_source,
+                "product_candidate_source": product_candidate_source,
+                "invalid_product_name_source": invalid_product_name_source,
                 "eligibility_results": results,
                 "eligibility_result": eligibility_result,
                 "context": {
@@ -287,7 +361,7 @@ def _extract_customer_profile_from_result(customer_result: dict[str, Any]) -> di
 
     payload = customer_result.get("result", {})
     if isinstance(payload, dict):
-        structured_profile = payload.get("customer_profile")
+        structured_profile = payload.get("customer_profile") or payload.get("profile")
         if isinstance(structured_profile, dict):
             return structured_profile
     return None
@@ -296,7 +370,7 @@ def _extract_customer_profile_from_result(customer_result: dict[str, Any]) -> di
 def _extract_customer_profile_from_agent_output(agent_output: dict[str, Any]) -> dict[str, Any] | None:
     payload = agent_output.get("result", {})
     if isinstance(payload, dict):
-        structured_profile = payload.get("customer_profile")
+        structured_profile = payload.get("customer_profile") or payload.get("profile")
         if isinstance(structured_profile, dict):
             return structured_profile
     return None
@@ -334,14 +408,49 @@ def _has_customer_result_text(customer_result: dict[str, Any]) -> bool:
 
 
 def _load_product_candidates(state: AgentState, product_result: dict, agent_outputs: dict) -> list[dict]:
-    product_candidates = state.get("product_candidates")
-    if not product_candidates:
-        product_candidates = _extract_product_candidates_from_result(product_result)
-    if not product_candidates:
-        product_candidates = extract_product_candidates(_extract_summary(agent_outputs.get("product_agent")))
-    else:
-        product_candidates = extract_product_candidates(product_candidates)
+    product_candidates, _ = _load_product_candidates_with_source(state, product_result, agent_outputs)
     return product_candidates
+
+
+def _load_product_candidates_with_source(
+    state: AgentState,
+    product_result: dict,
+    agent_outputs: dict,
+) -> tuple[list[dict], str]:
+    product_candidates = state.get("product_candidates")
+    if product_candidates:
+        return extract_product_candidates(product_candidates), "state.product_candidates"
+
+    product_candidates = _extract_list_path(product_result, "products")
+    if product_candidates:
+        return extract_product_candidates(product_candidates), "product_result.products"
+
+    product_candidates = _extract_list_path(product_result, "result", "products")
+    if product_candidates:
+        return extract_product_candidates(product_candidates), "product_result.result.products"
+
+    product_candidates = _extract_list_path(agent_outputs, "product_agent", "product_result", "products")
+    if product_candidates:
+        return extract_product_candidates(product_candidates), "agent_outputs.product_agent.product_result.products"
+
+    product_candidates = _extract_list_path(agent_outputs, "product_agent", "product_result", "result", "products")
+    if product_candidates:
+        return extract_product_candidates(product_candidates), "agent_outputs.product_agent.product_result.result.products"
+
+    summary = _extract_summary(product_result) or _extract_summary(agent_outputs.get("product_agent"))
+    table_candidates = extract_product_candidates_from_markdown_table(summary)
+    if table_candidates:
+        return extract_product_candidates(table_candidates), "markdown_table"
+
+    heading_candidates = _extract_candidates_from_heading(summary)
+    if heading_candidates:
+        return extract_product_candidates(heading_candidates), "markdown_heading"
+
+    fallback_candidates = extract_product_candidates(summary)
+    if fallback_candidates:
+        return extract_product_candidates(fallback_candidates), "summary_fallback"
+
+    return [], "missing"
 
 
 def _build_guarded_eligibility_results(
@@ -380,6 +489,34 @@ def _build_guarded_eligibility_results(
 
     for product in product_candidates:
         product_name = str(product.get("product_name") or "미확인 상품").strip()
+        if product_name in INVALID_PRODUCT_NAME_VALUES:
+            fallback_notes.append("invalid_product_name")
+            results.append(
+                _make_guarded_result(
+                    product_name=product_name,
+                    status="invalid_product",
+                    eligible=False,
+                    reasons=["상품명이 아니라 표 항목명 또는 레이블로 보입니다."],
+                    missing_fields=[],
+                    invalid_fields=["product_name", "invalid_product_name"],
+                    source_agent="eligibility_agent",
+                )
+            )
+            continue
+        if product_name in NON_PRODUCT_SECTION_NAMES:
+            fallback_notes.append("invalid_product_name")
+            results.append(
+                _make_guarded_result(
+                    product_name=product_name,
+                    status="invalid_product",
+                    eligible=False,
+                    reasons=["상품명이 아닌 섹션 제목이 product_name으로 전달되었습니다."],
+                    missing_fields=[],
+                    invalid_fields=["product_name"],
+                    source_agent="eligibility_agent",
+                )
+            )
+            continue
         invalid_reasons = _validate_product_name(product_name)
 
         # 문서 본문이 상품명으로 잘못 들어오면 이후 추천까지 오염될 수 있으므로
@@ -504,24 +641,100 @@ def _extract_user_constraints(state: AgentState) -> dict[str, Any]:
         "raw_query": user_query,
     }
 
+def _extract_user_constraints(state: AgentState) -> dict[str, Any]:
+    """
+    사용자 발화에서 명시된 희망 납입금액과 가입 기간만 추출한다.
+    거래 개월수는 고객 속성으로만 보고 희망 가입 기간으로 해석하지 않는다.
+    """
+
+    user_query = str(state.get("user_query") or _get_last_user_text(state.get("messages") or []))
+    normalized = user_query.replace(",", "").replace(" ", "")
+
+    monthly_amount = None
+    amount_match = re.search(r"([0-9]+)만원", normalized)
+    if amount_match:
+        monthly_amount = int(amount_match.group(1)) * 10000
+    else:
+        amount_match = re.search(r"([0-9]{4,})원", normalized)
+        if amount_match:
+            monthly_amount = int(amount_match.group(1))
+
+    period_months = None
+    explicit_period_patterns = [
+        r"가입기간[:=]?\s*([0-9]{1,2})개월",
+        r"희망기간[:=]?\s*([0-9]{1,2})개월",
+        r"([0-9]{1,2})개월짜리",
+        r"([0-9]{1,2})개월\s*(적금|예금|상품)",
+        r"([0-9]{1,2})개월\s*만기",
+        r"([0-9]{1,2})개월\s*가입",
+        r"([0-9]{1,2})년\s*(적금|예금|상품|만기|가입기간|가입)",
+    ]
+    blocked_period_patterns = [
+        r"거래\s*개월[:=]?\s*[0-9]{1,2}",
+        r"거래개월[:=]?\s*[0-9]{1,2}",
+        r"transaction_months[:=]?\s*[0-9]{1,2}",
+    ]
+
+    if not any(re.search(pattern, normalized) for pattern in blocked_period_patterns):
+        for pattern in explicit_period_patterns:
+            period_match = re.search(pattern, normalized)
+            if not period_match:
+                continue
+            period_months = int(period_match.group(1))
+            if "년" in pattern:
+                period_months *= 12
+            break
+
+    return {
+        "monthly_amount": monthly_amount,
+        "period_months": period_months,
+        "raw_query": user_query,
+    }
+
 
 def _apply_user_constraints(result: dict[str, Any], product: dict, user_constraints: dict[str, Any]) -> list[str]:
     fallback_notes: list[str] = []
     monthly_amount = user_constraints.get("monthly_amount")
     period_months = user_constraints.get("period_months")
 
-    min_amount, max_amount = _extract_amount_bounds(product)
+    min_amount, max_amount, amount_parse_uncertain = _extract_amount_bounds(product)
     period_min, period_max = _extract_period_bounds(product)
+    product_type = str(product.get("product_type") or "")
+    amount_check = {
+        "user_monthly_amount": monthly_amount,
+        "min_monthly_amount": min_amount,
+        "max_monthly_amount": max_amount,
+        "result": "unknown",
+    }
+
+    if amount_parse_uncertain:
+        fallback_notes.append("amount_parse_uncertain")
+        result["eligible"] = False
+        result["status"] = "needs_check"
+        result["reasons"] = _merge_unique_lists(
+            result.get("reasons", []),
+            ["상품 한도 금액 범위가 불명확하여 추가 확인이 필요합니다."],
+        )
+        amount_check["result"] = "needs_check"
 
     if monthly_amount is not None:
-        if max_amount is not None and monthly_amount > max_amount:
+        if "예금" in product_type and min_amount is None and max_amount is None:
+            result["eligible"] = False
+            result["status"] = "needs_check"
+            result["reasons"] = _merge_unique_lists(
+                result.get("reasons", []),
+                ["정기예금은 예치 가능 금액 확인이 필요합니다."],
+            )
+            amount_check["result"] = "needs_check"
+        elif max_amount is not None and monthly_amount > max_amount and not amount_parse_uncertain:
             fallback_notes.append("monthly_amount_exceeds_limit")
             result["eligible"] = False
-            result["status"] = "rejected"
+            result["status"] = "needs_check" if "예금" in product_type else "rejected"
             result["reasons"] = _merge_unique_lists(
                 result.get("reasons", []),
                 [f"사용자 희망 납입금액이 상품 최대 한도 {max_amount:,}원을 초과합니다."],
             )
+            amount_check["result"] = "fail"
         elif min_amount is not None and monthly_amount < min_amount:
             fallback_notes.append("monthly_amount_below_limit")
             result["eligible"] = False
@@ -529,6 +742,13 @@ def _apply_user_constraints(result: dict[str, Any], product: dict, user_constrai
             result["reasons"] = _merge_unique_lists(
                 result.get("reasons", []),
                 [f"사용자 희망 납입금액이 상품 최소 한도 {min_amount:,}원보다 낮을 수 있습니다."],
+            )
+            amount_check["result"] = "fail"
+        elif min_amount is not None or max_amount is not None:
+            amount_check["result"] = "pass"
+            result["reasons"] = _merge_unique_lists(
+                result.get("reasons", []),
+                [f"월 저축 가능액 {monthly_amount:,}원이 상품 한도 범위 내에 있습니다."],
             )
 
     if period_months is not None:
@@ -549,6 +769,7 @@ def _apply_user_constraints(result: dict[str, Any], product: dict, user_constrai
                 [f"사용자 희망 기간 {period_months}개월이 상품 기준과 맞지 않을 수 있습니다."],
             )
 
+    result["amount_check"] = amount_check
     return fallback_notes
 
 
@@ -602,6 +823,7 @@ def _enrich_customer_profile(customer_profile: dict[str, Any], *, source: str) -
         "job",
         "income",
         "monthly_saving_amount",
+        "transaction_months",
         "salary_transfer",
         "auto_transfer",
         "card_usage",
@@ -651,6 +873,13 @@ def _enrich_customer_profile(customer_profile: dict[str, Any], *, source: str) -
             profile["monthly_saving_amount"] = saving_value
             parsed_customer_fields.add("monthly_saving_amount")
             parsed_customer_values["monthly_saving_amount"] = saving_value
+
+    if profile.get("transaction_months") in (None, "", 0):
+        transaction_match = re.search(r"(거래\s*개월|거래개월|transaction_months)[:\s|*]*([0-9]{1,2})", raw_text)
+        if transaction_match:
+            profile["transaction_months"] = int(transaction_match.group(2))
+            parsed_customer_fields.add("transaction_months")
+            parsed_customer_values["transaction_months"] = profile["transaction_months"]
 
     if not profile.get("job"):
         job_match = re.search(r"(직업|customer_job)[:\s|*]*([^\n|]+)", raw_text)
@@ -855,22 +1084,66 @@ def _validate_product_name(product_name: str) -> list[str]:
     return reasons
 
 
-def _extract_amount_bounds(product: dict[str, Any]) -> tuple[int | None, int | None]:
-    min_amount = product.get("min_amount")
-    max_amount = product.get("max_amount")
-    raw_text = str(product.get("raw_text") or "")
+def _extract_amount_bounds(product: dict[str, Any]) -> tuple[int | None, int | None, bool]:
+    amount_text = str(product.get("amount_text") or product.get("raw_text") or "")
+    min_amount = product.get("min_monthly_amount")
+    max_amount = product.get("max_monthly_amount")
+    product_type = str(product.get("product_type") or "")
 
     if min_amount is None:
-        min_match = re.search(r"(최소|최저).{0,10}?([0-9][0-9,]*)", raw_text)
-        if min_match:
-            min_amount = int(min_match.group(2).replace(",", ""))
-
+        min_amount = product.get("min_amount")
     if max_amount is None:
-        max_match = re.search(r"(최대|최고).{0,10}?([0-9][0-9,]*)", raw_text)
-        if max_match:
-            max_amount = int(max_match.group(2).replace(",", ""))
+        max_amount = product.get("max_amount")
 
-    return min_amount, max_amount
+    if min_amount is None and amount_text:
+        min_match = re.search(r"(최소|최저|이상).{0,12}?([0-9][0-9,]*(?:억|천만|백만|십만|만)?원?)", amount_text)
+        if min_match:
+            min_amount = parse_korean_money(min_match.group(2))
+
+    if max_amount is None and amount_text:
+        max_match = re.search(r"(최대|최고|이하|한도).{0,12}?([0-9][0-9,]*(?:억|천만|백만|십만|만)?원?)", amount_text)
+        if max_match:
+            max_amount = parse_korean_money(max_match.group(2))
+
+    if min_amount is None or max_amount is None:
+        values = [
+            parse_korean_money(match.group(0))
+            for match in re.finditer(r"[0-9][0-9,]*(?:억|천만|백만|십만|만)?원?", amount_text)
+        ]
+        values = [value for value in values if value is not None]
+        if values:
+            if min_amount is None and not (len(values) == 1 and any(keyword in amount_text for keyword in ["최대", "이하", "한도"])):
+                min_amount = min(values)
+            if max_amount is None and not (len(values) == 1 and any(keyword in amount_text for keyword in ["최소", "이상"])):
+                max_amount = max(values)
+
+    amount_parse_uncertain = False
+    if amount_text and ("만원" in amount_text or "억" in amount_text or "천만" in amount_text) and (
+        (min_amount is not None and min_amount < 1000) or (max_amount is not None and max_amount < 1000)
+    ):
+        amount_parse_uncertain = True
+        repaired_values = [
+            parse_korean_money(match.group(0))
+            for match in re.finditer(r"[0-9][0-9,]*(?:억|천만|백만|십만|만)?원?", amount_text)
+        ]
+        repaired_values = [value for value in repaired_values if value is not None]
+        if repaired_values:
+            if min_amount is None or min_amount < 1000:
+                if not (len(repaired_values) == 1 and any(keyword in amount_text for keyword in ["최대", "이하", "한도"])):
+                    min_amount = min(repaired_values)
+                else:
+                    min_amount = None
+            if max_amount is None or max_amount < 1000:
+                if not (len(repaired_values) == 1 and any(keyword in amount_text for keyword in ["최소", "이상"])):
+                    max_amount = max(repaired_values)
+                else:
+                    max_amount = None
+            amount_parse_uncertain = False
+
+    if "예금" in product_type and min_amount is None and max_amount is None:
+        return None, None, False
+
+    return min_amount, max_amount, amount_parse_uncertain
 
 
 def _extract_period_bounds(product: dict[str, Any]) -> tuple[int | None, int | None]:
@@ -1070,16 +1343,50 @@ def _extract_tool_result(result_container, tool_name: str) -> str:
     return ""
 
 
-def _extract_product_candidates_from_result(product_result) -> list[dict]:
+def _extract_products_from_result(product_result) -> list[dict]:
     if not isinstance(product_result, dict):
         return []
-    result = product_result.get("result", {})
-    if not isinstance(result, dict):
-        return []
-    product_candidates = result.get("product_candidates", [])
-    if isinstance(product_candidates, list):
+    products = _extract_list_path(product_result, "products")
+    if products:
+        return products
+    products = _extract_list_path(product_result, "result", "products")
+    if products:
+        return products
+    product_candidates = _extract_list_path(product_result, "result", "product_candidates")
+    if product_candidates:
         return product_candidates
     return []
+
+
+def _extract_list_path(container: Any, *path: str) -> list[dict]:
+    current = container
+    for key in path:
+        if not isinstance(current, dict):
+            return []
+        current = current.get(key)
+    if isinstance(current, list):
+        return current
+    return []
+
+
+def _extract_product_candidates_from_result(product_result) -> list[dict]:
+    return _extract_products_from_result(product_result)
+
+
+def _extract_candidates_from_heading(summary: str) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for line in str(summary or "").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            continue
+        cleaned = re.sub(r"^\s*#+\s*", "", stripped)
+        cleaned = re.sub(r"^\d+[.)]?\s*", "", cleaned)
+        cleaned = re.sub(r"^\d+\S*\s*", "", cleaned)
+        cleaned = re.sub(r"\s*\([^)]*\)\s*$", "", cleaned)
+        cleaned = cleaned.replace("**", "").replace("“", "").replace("”", "").replace("‘", "").replace("’", "").strip()
+        if cleaned and "상품명" not in cleaned:
+            candidates.append({"product_name": cleaned, "raw_text": line})
+    return candidates
 
 
 def _dedupe(items: list[str]) -> list[str]:
