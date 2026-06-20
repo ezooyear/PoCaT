@@ -1,0 +1,11 @@
+"product_id","product_name","product_type","join_channel","min_amount","max_amount","min_period_months","max_period_months","partial_withdrawal_yn","auto_redeposit_yn","additional_deposit_yn","is_active","base_rate","max_rate","age_min","age_max","rag_document_key"
+1,KB Star 정기예금,예금,인터넷뱅킹/KB스타뱅킹/고객센터,1000000,,1,36,true,true,false,true,1.80,2.20,19,,KBStar정기예금_250901
+2,KB미소드림적금,적금,영업점,10000,200000,12,60,false,false,true,true,3.60,5.00,19,,KB미소드림적금_250901
+3,KB상호부금(자유적립식),적금,영업점/인터넷뱅킹/KB스타뱅킹/고객센터,10000,5000000,12,72,false,false,true,true,1.50,3.30,0,,KB상호부금_자유_250901
+4,KB상호부금(정액적립식),적금,영업점/인터넷뱅킹/KB스타뱅킹/고객센터,10000,,6,72,false,false,true,true,2.10,3.40,0,,KB상호부금_정액_250901
+5,KB 스타적금Ⅲ,적금,KB스타뱅킹,10000,300000,12,12,false,false,true,true,2.00,5.00,19,,KB스타적금3상품_2604
+6,KB나라사랑적금(직업군인용),적금,영업점,1000,500000,12,36,false,false,true,true,1.50,5.60,,,직업군인_약관 및 상품설명서.pdf
+7,KB 장병내일준비적금,적금,영업점/KB스타뱅킹,0,300000,1,24,false,false,true,true,4.00,10.50,,,장병내일적금상품설명서260402.pdf
+8,KB 장기간부 도약적금,적금,영업점/KB스타뱅킹,100000,300000,36,36,false,false,true,true,5.50,6.00,,,장기간부_약관 및 상품설명서.pdf
+9,일반정기적금,적금,영업점,10000,,6,36,false,false,true,true,2.20,2.75,,,일반정기적금_250901.pdf
+10,일반정기예금,예금,영업점/인터넷뱅킹,100000,,1,60,false,false,false,true,1.40,2.20,,,일반정기예금_250901.pdf
