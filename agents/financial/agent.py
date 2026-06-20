@@ -631,8 +631,5 @@ def _looks_like_missing_info_summary(summary: str) -> bool:
         "계산하기 위해 필요한",
         "확보돼야",
         "알려 주시면",
-        "?뺣낫",
-        "遺議",
-        "?뚮젮",
     ]
     return any(marker in str(summary or "") for marker in missing_markers)
