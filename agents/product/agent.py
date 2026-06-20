@@ -180,7 +180,13 @@ def _extract_product_type(text: str) -> str | None:
 
 
 def _extract_rates(text: str) -> tuple[float | None, float | None]:
-    matches = [float(m.replace(",", "")) for m in re.findall(r"([0-9]+(?:\.[0-9]+)?)\s*%", text)]
+    matches = []
+    for m in re.findall(r"([0-9]+(?:\.[0-9]+)?)\s*%", text):
+        val = float(m.replace(",", ""))
+        # 일반적인 예적금 금리 범위(0.1% ~ 12.0%) 내의 값만 수용 (담보대출 95% 비율 등 오인 차단)
+        if 0.1 <= val <= 12.0:
+            matches.append(val)
+            
     if not matches:
         return None, None
     if len(matches) == 1:
@@ -218,16 +224,24 @@ def _extract_preferential_conditions_text(text: str) -> str | None:
 
 
 def _extract_preferential_conditions(text: str) -> list[dict[str, Any]]:
+    # 텍스트에 우대 혜택을 언급하는 맥락이 없는 경우 우대 조건 목록 생성을 차단합니다.
+    if not any(w in text for w in ["우대", "최고이율", "최고금리", "혜택"]):
+        return []
+
     conditions = []
     for keyword in ["급여이체", "자동이체", "카드", "주거래", "마케팅"]:
         if keyword in text:
-            conditions.append(
-                {
-                    "name": keyword,
-                    "condition": f"{keyword} 조건을 만족하면 우대금리 적용 가능",
-                    "rate": None,
-                }
-            )
+            # 키워드 주변 150자 이내에 우대/가산/이율/금리/+/% 등 실질적인 이율 우대 문맥이 있을 때만 추가
+            idx = text.find(keyword)
+            context = text[max(0, idx-50):min(len(text), idx+150)]
+            if any(w in context for w in ["우대", "가산", "더해", "추가", "이율", "금리", "+", "%"]):
+                conditions.append(
+                    {
+                        "name": keyword,
+                        "condition": f"{keyword} 조건을 만족하면 우대금리 적용 가능",
+                        "rate": None,
+                    }
+                )
     return conditions
 
 

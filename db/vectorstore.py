@@ -226,14 +226,29 @@ def search_products(query: str, k: int = 3) -> List[Document]:
     # 리랭커 점수 계산
     scores = reranker.predict(pairs)
     
+    # 3. 단일 상품 집중 질문의 경우 동일 파일(source_file) 부스팅 가산점 적용
+    # 비교 질문이 아닐 때, 1위로 매치된 핵심 상품의 다른 페이지들이 다른 상품에 밀려 누락되는 것 방지
+    is_comparative = any(kw in query for kw in ["비교", "차이", "모두", "목록", "공통", "다른점", "차이점"])
+    target_file = None
+    if not is_comparative and dense_results:
+        target_file = dense_results[0].metadata.get("source_file")
+
+    boosted_candidates = []
+    for doc, score in zip(final_candidates, scores):
+        doc_source = doc.metadata.get("source_file")
+        final_score = float(score)
+        if target_file and doc_source == target_file:
+            final_score += 0.5  # 동일 파일의 다른 페이지 조각들에 부스팅 가산점 부여
+        boosted_candidates.append((doc, final_score))
+
     # 문서와 점수를 매핑하여 정렬
     ranked_docs = sorted(
-        zip(final_candidates, scores),
+        boosted_candidates,
         key=lambda x: x[1],
         reverse=True
     )
 
-    # 3. 최종 결과 취합 및 부모 문서 수준 중복 제거 (Deduplicate Parent Chunks)
+    # 4. 최종 결과 취합 및 부모 문서 수준 중복 제거 (Deduplicate Parent Chunks)
     final_docs = []
     seen_parents = set()
 
