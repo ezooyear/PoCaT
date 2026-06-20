@@ -11,20 +11,23 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
+from sentence_transformers import CrossEncoder
 
 # ─── 경로 설정 ───
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PDF_DIR = os.path.join(BASE_DIR, "data", "pdfs")
 CHROMA_DIR = os.path.join(BASE_DIR, "data", "chroma_db")
 
-# ─── 임베딩 모델 설정 ───
+# ─── 임베딩 및 리랭커 모델 설정 ───
 EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-small"
+RERANKER_MODEL_NAME = "Dongjin-kr/ko-reranker"
 
 # 프로세스 단위 싱글톤 캐시
 _EMBEDDINGS_INSTANCE = None
 _VECTORSTORE_INSTANCE = None
 _ALL_DOCS_CACHE = None
 _BM25_RETRIEVER_INSTANCE = None
+_RERANKER_INSTANCE = None
 
 
 def _get_embeddings():
@@ -33,10 +36,20 @@ def _get_embeddings():
     if _EMBEDDINGS_INSTANCE is None:
         _EMBEDDINGS_INSTANCE = HuggingFaceEmbeddings(
             model_name=EMBEDDING_MODEL_NAME,
-            model_kwargs={"device": "mps"},
+            model_kwargs={"device": "cpu"},
             encode_kwargs={"normalize_embeddings": True},
         )
     return _EMBEDDINGS_INSTANCE
+
+
+def _get_reranker() -> CrossEncoder:
+    """리랭커 싱글톤 인스턴스를 반환합니다."""
+    global _RERANKER_INSTANCE
+    if _RERANKER_INSTANCE is None:
+        print(f"🔄 리랭커 모델 로드 중... ({RERANKER_MODEL_NAME})")
+        _RERANKER_INSTANCE = CrossEncoder(RERANKER_MODEL_NAME, device="cpu")
+        print("✅ 리랭커 모델 로드 완료!")
+    return _RERANKER_INSTANCE
 
 
 def build_vectorstore():
@@ -158,25 +171,45 @@ def get_vectorstore():
 def search_products(query: str, k: int = 3) -> List[Document]:
     """
     초경량 임베딩 모델을 사용하여 ChromaDB에서 유사도 검색(Dense)을 수행한 후,
-    부모 문서 수준의 중복을 제거하여 최종 k개의 부모 문서(Parent Document)를 반환합니다.
+    Cross-Encoder 리랭킹을 거쳐 가장 관련성 높은 부모 문서(Parent Document)들을 반환합니다.
     """
     vectorstore = get_vectorstore()
     if vectorstore is None:
         print("⚠️ Vector DB를 찾을 수 없습니다. 빈 결과를 반환합니다.")
         return []
 
-    # 부모 문서 기준 중복 제거 시 최종 k개를 채우기 위해 k * 4 정도로 넉넉히 검색
-    candidates_limit = k * 4
+    # 1. 1차 후보군 추출 개수 설정 (최대 후보 20개, k 배수 확장)
+    candidates_limit = max(k * 5, 20)
 
+    # 2. Dense 검색 (유사도 검색)
     dense_results = vectorstore.similarity_search(query, k=candidates_limit)
     if not dense_results:
         return []
 
-    # 최종 결과 취합 및 부모 문서 수준 중복 제거
+    # 3. Cross-Encoder 리랭킹 (Reranker)
+    reranker = _get_reranker()
+    
+    # 쿼리와 각 후보 문서의 '부모 본문(parent_content)'을 쌍으로 구성하여 예측
+    pairs = []
+    for doc in dense_results:
+        parent_txt = doc.metadata.get("parent_content", doc.page_content)
+        pairs.append([query, parent_txt])
+
+    # 리랭커 점수 계산
+    scores = reranker.predict(pairs)
+    
+    # 문서와 점수를 매핑하여 정렬
+    ranked_docs = sorted(
+        zip(dense_results, scores),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    # 4. 최종 결과 취합 및 부모 문서 수준 중복 제거 (Deduplicate Parent Chunks)
     final_docs = []
     seen_parents = set()
 
-    for doc in dense_results:
+    for doc, score in ranked_docs:
         parent_txt = doc.metadata.get("parent_content", doc.page_content)
         parent_id = doc.metadata.get("parent_id", parent_txt)
         
@@ -188,6 +221,7 @@ def search_products(query: str, k: int = 3) -> List[Document]:
                 metadata={
                     "source_file": doc.metadata.get("source_file", "알 수 없음"),
                     "page": doc.metadata.get("page", "?"),
+                    "score": float(score)  # 디버깅 및 분석용 점수 주입
                 }
             )
             final_docs.append(parent_doc)

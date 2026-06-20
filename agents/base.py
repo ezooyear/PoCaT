@@ -2,6 +2,7 @@
 Shared agent execution utilities.
 """
 
+import time
 from typing import Any, Optional
 
 from langchain_core.messages import SystemMessage, ToolMessage
@@ -11,6 +12,7 @@ from graph.state import AgentState
 from observability.langfuse import (
     flush_langfuse,
     langfuse_observation,
+    safe_jsonable,
     summarize_for_langfuse,
     update_observation,
 )
@@ -119,6 +121,7 @@ def run_agent_loop(
     prev_context_intro: str = "이전 단계에서 확인한 정보",
     prev_context_labels: Optional[dict] = None,
     prev_context_suffix: str = "",
+    span_name: Optional[str] = None,
 ) -> dict:
     structured_result: dict[str, Any] | None = None
     tool_results: list[dict[str, Any]] = []
@@ -235,7 +238,7 @@ def run_agent_loop(
         completed_agents.append(output_key)
 
     return_data = {
-        "messages": [response],
+        "messages": [response] if response else [],
         "agent_outputs": outputs,
         "current_step": (state.get("current_step") or 0) + 1,
         "current_agent": output_key,

@@ -244,6 +244,58 @@ def update_observation(
         pass
 
 
+def safe_jsonable(
+    value: Any,
+    *,
+    max_depth: int = 5,
+    max_str_len: int = 500,
+    _seen: "frozenset[int] | None" = None,
+) -> Any:
+    """JSON-safe 변환: circular ref → '<circular_ref>', set/tuple → list, 객체 → str, 깊이/길이 제한."""
+    if _seen is None:
+        _seen = frozenset()
+
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+
+    if isinstance(value, str):
+        return value[:max_str_len]
+
+    obj_id = id(value)
+    if obj_id in _seen:
+        return "<circular_ref>"
+
+    if max_depth <= 0:
+        try:
+            return str(value)[:max_str_len]
+        except Exception:
+            return "<unserializable>"
+
+    next_seen = frozenset(_seen | {obj_id})
+    kw = {"max_depth": max_depth - 1, "max_str_len": max_str_len, "_seen": next_seen}
+
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for i, (k, v) in enumerate(value.items()):
+            if i >= 20:
+                result["_truncated"] = True
+                break
+            result[str(k)[:80]] = safe_jsonable(v, **kw)
+        return result
+
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = list(value)
+        out = [safe_jsonable(item, **kw) for item in items[:20]]
+        if len(items) > 20:
+            out.append({"_truncated": True, "original_count": len(items)})
+        return out
+
+    try:
+        return str(value)[:max_str_len]
+    except Exception:
+        return "<unserializable>"
+
+
 def flush_langfuse() -> None:
     client = get_langfuse_client()
     if client is None:
