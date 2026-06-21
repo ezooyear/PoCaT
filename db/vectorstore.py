@@ -228,7 +228,7 @@ def search_products(query: str, k: int = 3) -> List[Document]:
     
     # 3. 단일 상품 집중 질문의 경우 동일 파일(source_file) 부스팅 가산점 적용
     # 비교 질문이 아닐 때, 1위로 매치된 핵심 상품의 다른 페이지들이 다른 상품에 밀려 누락되는 것 방지
-    is_comparative = any(kw in query for kw in ["비교", "차이", "모두", "목록", "공통", "다른점", "차이점"])
+    is_comparative = any(kw in query for kw in ["비교", "차이", "모두", "목록", "공통", "다른점", "차이점", "추천", "순위", "종합", "맞는", "적합한", "예적금"])
     target_file = None
     if not is_comparative and dense_results:
         target_file = dense_results[0].metadata.get("source_file")

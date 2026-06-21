@@ -29,12 +29,12 @@ except Exception:
     get_product_detail_map = None
 
 REQUIRED_PROFILE_FIELDS = {
-    "age": "age",
-    "job": "job",
-    "monthly_saving_amount": "monthly_saving_amount",
-    "income": "income",
-    "salary_transfer": "salary_transfer",
-    "auto_transfer": "auto_transfer",
+    "age": "고객 나이 정보",
+    "job": "군 복무/직업 정보",
+    "monthly_saving_amount": "고객 월 가용 저축액",
+    "income": "고객 소득 정보",
+    "salary_transfer": "급여이체 상태",
+    "auto_transfer": "자동이체 상태",
 }
 
 INVALID_PRODUCT_MARKERS = [
@@ -63,7 +63,6 @@ def _merge_user_constraints_into_customer_profile(
     monthly_amount = user_constraints.get("monthly_amount")
     if monthly_amount is not None and profile.get("monthly_saving_amount") in (None, "", 0):
         profile["monthly_saving_amount"] = monthly_amount
-        parsed_fields.add("monthly_saving_amount")
         parsed_values["monthly_saving_amount"] = monthly_amount
 
     profile["parsed_customer_fields"] = list(parsed_fields)
@@ -472,12 +471,13 @@ def _build_guarded_eligibility_results(
         if job_constraint_notes:
             fallback_notes.extend(job_constraint_notes)
 
-        if profile_missing_fields and guarded_result["status"] == "eligible":
+        if profile_missing_fields and guarded_result["status"] in {"eligible", "needs_check"}:
             fallback_notes.append("customer_profile_incomplete")
             # 고객 핵심 정보가 없으면 eligible=true가 downstream 추천으로 이어질 수 있으므로
             # 확정 가능 대신 needs_check로 낮춰서 반환합니다.
-            guarded_result["eligible"] = False
-            guarded_result["status"] = "needs_check"
+            if guarded_result["status"] == "eligible":
+                guarded_result["eligible"] = False
+                guarded_result["status"] = "needs_check"
             guarded_result["missing_fields"] = _merge_unique_lists(
                 guarded_result.get("missing_fields", []),
                 profile_missing_fields,
@@ -943,10 +943,10 @@ def _find_missing_profile_fields(customer_profile: dict[str, Any]) -> list[str]:
         value = customer_profile.get(field_name)
 
         # 파싱되지 않은 핵심 고객 정보는 eligibility 오판의 가장 큰 원인이므로
-        # False/None/빈값을 엄격하게 missing으로 간주합니다.
+        # False/None/빈값 또는 실제 파싱되지 않은 필드는 엄격하게 missing으로 간주합니다.
         if field_name == "income":
             income_value = customer_profile.get("income")
-            if income_value in (None, "", 0):
+            if income_value in (None, "", 0) or "income" not in parsed_customer_fields:
                 missing_fields.append(label)
             continue
 
@@ -955,7 +955,7 @@ def _find_missing_profile_fields(customer_profile: dict[str, Any]) -> list[str]:
                 missing_fields.append(label)
             continue
 
-        if value in (None, "", 0):
+        if value in (None, "", 0) or field_name not in parsed_customer_fields:
             missing_fields.append(label)
 
     return _dedupe(missing_fields)
@@ -1253,6 +1253,20 @@ def _is_job_sensitive_product(product: dict[str, Any]) -> bool:
     ]
 
     return any(keyword in normalized for keyword in job_keywords)
+
+
+def _extract_age_from_summary(raw_text: str) -> int | None:
+    patterns = [
+        r"연령[:\s]*([0-9]{1,2})(?!\d)",
+        r"나이[:\s]*([0-9]{1,2})(?!\d)",
+        r"만\s*([0-9]{1,2})세",
+        r"([0-9]{1,2})\s*세",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, raw_text)
+        if match:
+            return int(match.group(1))
+    return None
 
 
 def _extract_birth_date_from_summary(raw_text: str) -> str | None:

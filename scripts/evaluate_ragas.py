@@ -63,9 +63,11 @@ def main():
         
         print(f"   [{i}/{len(golden_data)}] Question: {question[:40]}...")
 
-        # A. Retrieve contexts (Parent Chunks) with Query Reformulation and Dynamic K
-        is_comparative = any(keyword in question for keyword in ["비교", "차이", "모두", "목록", "공통", "다른점"])
-        target_k = 6 if is_comparative else 4
+        is_comparative = any(
+            keyword in question
+            for keyword in ["비교", "차이", "모두", "목록", "공통", "다른점", "차이점", "추천", "순위", "종합", "맞는", "적합한", "예적금"]
+        )
+        target_k = 5 if is_comparative else 3
         
         reformed_query = reformulate_query(question)
         retrieved_docs = search_products(reformed_query, k=target_k)

@@ -7,6 +7,7 @@ Product 에이전트 전용 도구
 """
 
 import re
+import unicodedata
 from typing import Any
 
 from langchain_core.tools import tool
@@ -65,6 +66,27 @@ INVALID_PRODUCT_NAME_MARKERS = [
     "저축금액",
     "저축방법",
     "페이지",
+    "출처",
+    "해지",
+    "기준",
+    "보유",
+    "이체",
+    "불가",
+    "양도",
+    "담보",
+    "제공",
+    "휴면",
+    "계좌",
+    "약관",
+    "설명서",
+    "수수료",
+    "세금",
+    "과세",
+    "이자율",
+    "중도해지",
+    "만기",
+    "원금",
+    "이자",
 ]
 
 
@@ -74,6 +96,14 @@ INVALID_PRODUCT_NAME_MARKERS = [
 
 def reformulate_query(query: str) -> str:
     """사용자 질문을 RAG 검색에 최적화된 형태로 재정형합니다."""
+    # 종합 추천, 비교 질문인 경우 RAG 검색 결과의 일관성 및 전체 상품 수집을 위해 고정 쿼리 사용
+    is_comparative = any(
+        keyword in query
+        for keyword in ["비교", "차이", "모두", "목록", "공통", "다른점", "차이점", "추천", "순위", "종합", "맞는", "적합한", "예적금"]
+    )
+    if is_comparative:
+        return "KB국민은행 예적금 상품 종류 금리 가입대상 조건 우대이율"
+
     try:
         from config.settings import get_llm
         from langchain_core.messages import SystemMessage, HumanMessage
@@ -117,10 +147,10 @@ def search_terms(query: str) -> str:
     """
     is_comparative = any(
         keyword in query
-        for keyword in ["비교", "차이", "모두", "목록", "공통", "다른점", "추천", "순위", "예적금"]
+        for keyword in ["비교", "차이", "모두", "목록", "공통", "다른점", "차이점", "추천", "순위", "종합", "맞는", "적합한", "예적금"]
     )
 
-    target_k = 10 if is_comparative else 6
+    target_k = 5 if is_comparative else 3
 
     reformed_query = reformulate_query(query)
     results = search_products(reformed_query, k=target_k)
@@ -249,9 +279,12 @@ def _extract_source_info(chunk: str) -> tuple[str | None, str | None]:
 
 
 def _extract_product_name_from_chunk(chunk: str, source_file: str | None = None) -> str:
-    # 1순위: source_file 기반 보정
-    if source_file in SOURCE_PRODUCT_META:
-        return SOURCE_PRODUCT_META[source_file]["product_name"]
+    # 1순위: source_file 기반 보정 (NFC 정규화 적용)
+    if source_file:
+        normalized_sf = unicodedata.normalize("NFC", source_file)
+        for meta_key, meta_val in SOURCE_PRODUCT_META.items():
+            if unicodedata.normalize("NFC", meta_key) == normalized_sf:
+                return meta_val["product_name"]
 
     # 2순위: 문서 내 명시적 상품명 패턴
     patterns = [
@@ -330,6 +363,10 @@ def _is_valid_product_name(product_name: Any) -> bool:
         return False
 
     if len(text) > 40:
+        return False
+
+    # 대괄호, 중괄호가 포함된 이름은 상품명이 아닐 확률이 매우 높음 (출처 표시 등)
+    if "[" in text or "]" in text or "【" in text or "】" in text:
         return False
 
     if any(marker in text for marker in INVALID_PRODUCT_NAME_MARKERS):

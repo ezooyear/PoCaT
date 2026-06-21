@@ -354,15 +354,99 @@ def product_agent_node(state: AgentState) -> dict:
                 )
 
             # ---- sub-span 2: llm_loop (via run_agent_loop) -----------------
-            result = run_agent_loop(
-                state=state,
-                system_prompt=PRODUCT_SYSTEM_PROMPT,
-                tools=PRODUCT_TOOLS,
-                output_key="product_agent",
-                result_key="product_result",
-                max_iterations=3,
-                span_name="product_agent.llm_loop",
+            user_query = str(state.get("user_query") or "")
+            is_comparative = any(
+                keyword in user_query
+                for keyword in ["비교", "차이", "모두", "목록", "공통", "다른점", "차이점", "추천", "순위", "종합", "맞는", "적합한", "예적금"]
             )
+
+            if is_comparative:
+                # LLM 루프를 거치지 않고 고객 정보를 반영하여 LLM(Temp=0)으로 RAG 쿼리 재정형 후 직접 실행
+                from agents.product.tools import search_terms
+                from langchain_core.messages import AIMessage, SystemMessage, HumanMessage
+                from config.settings import get_llm
+
+                customer_profile = state.get("customer_profile") or {}
+                profile_desc = ""
+                if customer_profile:
+                    profile_desc = (
+                        f"고객 프로필 정보:\n"
+                        f"- 나이: {customer_profile.get('age') or '알 수 없음'}\n"
+                        f"- 직업: {customer_profile.get('job') or '알 수 없음'}\n"
+                        f"- 월 가용 저축액: {customer_profile.get('monthly_saving_amount') or '알 수 없음'}\n"
+                    )
+
+                system_prompt = (
+                    "당신은 금융 상품 약관 RAG 검색에 최적화된 검색 키워드 정형화 전문가입니다.\n"
+                    "제공된 고객 프로필 정보와 사용자 질문을 기반으로, "
+                    "ChromaDB에서 가장 관련성 높은 예적금 상품 약관을 검색하기 위한 검색 키워드 조합 한 줄만을 생성하십시오.\n\n"
+                    "## 지침:\n"
+                    "1. 설명이나 부연설명 없이 오직 RAG 검색에 유용한 키워드들로만 구성된 최적화된 검색 쿼리 단 하나만 한 줄로 출력해야 합니다. 따옴표도 붙이지 마십시오.\n"
+                    "2. 고객의 나이, 직업(예: 군인 등) 정보가 검색에 필요한 상품 범주와 관련이 있다면 검색 키워드에 반드시 포함시키십시오.\n"
+                    "3. 사용자가 전체 상품 추천 및 비교를 요청했을 때 고객의 직업이 '군인'인 경우, 군인 대상 특수 상품('KB나라사랑적금(직업군인용)', 'KB장병내일준비적금', '장기간부 적금')이 모두 누락 없이 RAG 상위에 검색되도록 'KB국민은행 군인 장병 나라사랑 장기간부 예적금 상품 종류 금리 가입대상 조건 우대이율' 키워드 조합을 적극 포함하여 재구성하십시오.\n"
+                    "4. 만약 특별한 조건이나 타겟 고객 정보가 없다면 기본 검색어 조합인 'KB국민은행 예적금 상품 종류 금리 가입대상 조건 우대이율' 형태로 정리하십시오.\n"
+                )
+
+                messages = [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=f"{profile_desc}사용자 질문: '{user_query}'"),
+                ]
+
+                try:
+                    llm = get_llm(temperature=0)
+                    response = llm.invoke(messages)
+                    reformed_query = str(getattr(response, "content", response) or "").strip()
+                    reformed_query = reformed_query.replace("'", "").replace('"', "")
+                    if not reformed_query:
+                        reformed_query = "KB국민은행 예적금 상품 종류 금리 가입대상 조건 우대이율"
+                except Exception:
+                    reformed_query = "KB국민은행 예적금 상품 종류 금리 가입대상 조건 우대이율"
+
+                tool_result_str = search_terms.invoke({"query": reformed_query})
+
+                tool_results_list = [{
+                    "tool_name": "search_terms",
+                    "tool_args": {"query": reformed_query},
+                    "tool_result": tool_result_str,
+                }]
+
+                summary = "RAG 검색을 통해 KB국민은행의 주요 예적금 상품 목록과 가입 요건을 일관되게 추출하였습니다."
+
+                structured_result = make_agent_result(
+                    status="success",
+                    result={
+                        "summary": summary,
+                        "tool_results": tool_results_list,
+                    },
+                    evidence=tool_results_list,
+                    error=None,
+                )
+
+                outputs = dict(state.get("agent_outputs") or {})
+                outputs["product_agent"] = structured_result
+
+                completed_agents = list(state.get("completed_agents") or [])
+                if "product_agent" not in completed_agents:
+                    completed_agents.append("product_agent")
+
+                result = {
+                    "messages": [AIMessage(content=summary)],
+                    "agent_outputs": outputs,
+                    "current_step": (state.get("current_step") or 0) + 1,
+                    "current_agent": "product_agent",
+                    "completed_agents": completed_agents,
+                    "product_result": structured_result,
+                }
+            else:
+                result = run_agent_loop(
+                    state=state,
+                    system_prompt=PRODUCT_SYSTEM_PROMPT,
+                    tools=PRODUCT_TOOLS,
+                    output_key="product_agent",
+                    result_key="product_result",
+                    max_iterations=3,
+                    span_name="product_agent.llm_loop",
+                )
 
             # extract raw tool call records from the completed loop
             tool_results_list = _extract_tool_results(result)
@@ -437,6 +521,19 @@ def product_agent_node(state: AgentState) -> dict:
                     raw_search_results
                 )
                 products = [_normalize_product_candidate(candidate) for candidate in product_candidates]
+
+                # 군인 자격 필터링 (고객 직업이 '군인'이 아닌 경우 군인 전용 상품 3종 사전 제외)
+                from agents.base import get_customer_profile as base_get_customer_profile
+                customer_profile = state.get("customer_profile")
+                if not customer_profile:
+                    profile_res = base_get_customer_profile(state)
+                    customer_profile = profile_res.get("data") or {}
+
+                is_soldier = str(customer_profile.get("job") or "").strip() == "군인"
+                if not is_soldier:
+                    military_product_names = {"KB나라사랑적금(직업군인용)", "KB장병내일준비적금", "장기간부 적금"}
+                    products = [p for p in products if p.get("product_name") not in military_product_names]
+                    product_candidates = [c for c in product_candidates if c.get("product_name") not in military_product_names]
 
                 outer_meta["product_count"] = len(products)
                 outer_meta["structured_product_count"] = len(products)
