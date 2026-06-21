@@ -950,7 +950,7 @@ def _augment_recommendation_financial_results(state: AgentState, result: dict) -
             )
         )
 
-        eligibility_item = eligibility_by_name.get(product_name)
+        eligibility_item = _get_eligibility_item_by_product_name(eligibility_by_name, product_name)
         if isinstance(eligibility_item, dict):
             eligibility_status = eligibility_item.get("status")
             is_eligible = eligibility_item.get("eligible") is True
@@ -1537,3 +1537,411 @@ def _to_float_or_none(value: Any) -> float | None:
         return float(str(value).replace(",", "").replace("%", ""))
     except Exception:
         return None
+
+
+# retry loop fix - final safety overrides for recommendation financial calculation
+# NOTE:
+# 아래 함수들은 파일 하단에서 같은 이름의 기존 helper들을 덮어써서 사용됩니다.
+# 목적:
+# 1) KB 스타 적금Ⅲ 월 납입한도 300,000원 cap 누락 방지
+# 2) product_name 표기 차이로 DB products 보강이 실패하는 문제 완화
+# 3) eligibility 결과가 name/product_name 중 어떤 키로 와도 매칭
+# 4) recommendation용 financial_results/calculations가 _ensure_financial_calculations에서 지워지는 문제 방지
+
+_PRODUCT_FIELD_FALLBACKS: list[tuple[tuple[str, ...], dict[str, Any]]] = [
+    (
+        ("kb스타적금3", "kb스타적금iii", "kbstar적금3"),
+        {
+            "product_name": "KB 스타 적금Ⅲ",
+            "product_type": "적금",
+            "min_amount": 10000,
+            "max_amount": 300000,
+            "min_period_months": 12,
+            "max_period_months": 12,
+        },
+    ),
+]
+
+
+def _normalize_product_lookup_name(name: Any) -> str:
+    text = str(name or "").lower()
+
+    replacements = {
+        "ⅰ": "1",
+        "Ⅰ": "1",
+        "ⅱ": "2",
+        "Ⅱ": "2",
+        "ⅲ": "3",
+        "Ⅲ": "3",
+        "iii": "3",
+        "ii": "2",
+        "i": "1",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+
+    text = text.replace("국민은행", "")
+    text = text.replace("kb국민", "kb")
+    text = re.sub(r"[^0-9a-z가-힣]+", "", text)
+    return text
+
+
+def _product_lookup_blob(product: dict[str, Any]) -> str:
+    lookup_values = [
+        product.get("product_name"),
+        product.get("product_key"),
+        product.get("rag_document_key"),
+        product.get("source_file"),
+        product.get("file_name"),
+        product.get("document_name"),
+        product.get("raw_text"),
+    ]
+    return _normalize_product_lookup_name(" ".join(str(value or "") for value in lookup_values))
+
+
+def _get_product_field_fallback(product: dict[str, Any], field_name: str) -> Any:
+    blob = _product_lookup_blob(product)
+    if not blob:
+        return None
+
+    for aliases, values in _PRODUCT_FIELD_FALLBACKS:
+        if any(_normalize_product_lookup_name(alias) in blob for alias in aliases):
+            return values.get(field_name)
+
+    return None
+
+
+def _to_int_or_none(value: Any) -> int | None:
+    if value in (None, "", []):
+        return None
+
+    if isinstance(value, (int, float)):
+        return int(value)
+
+    text = str(value).replace(",", "").strip()
+    if not text:
+        return None
+
+    match = re.search(r"(\d+(?:\.\d+)?)\s*만원", text)
+    if match:
+        return int(float(match.group(1)) * 10000)
+
+    match = re.search(r"(\d+(?:\.\d+)?)\s*천원", text)
+    if match:
+        return int(float(match.group(1)) * 1000)
+
+    match = re.search(r"(\d+)\s*원", text)
+    if match:
+        return int(match.group(1))
+
+    match = re.search(r"\d+", text)
+    if not match:
+        return None
+
+    return int(match.group(0))
+
+
+def _extract_product_max_amount(product: dict[str, Any]) -> int | None:
+    parsed_amount = (
+        _to_won_amount_or_none(product.get("max_amount"))
+        or _to_won_amount_or_none(product.get("max_monthly_amount"))
+        or _to_won_amount_or_none(product.get("max_deposit_amount"))
+        or _to_int_or_none(product.get("max_amount"))
+        or _to_int_or_none(product.get("max_monthly_amount"))
+        or _to_int_or_none(product.get("max_deposit_amount"))
+    )
+
+    fallback_amount = _get_product_field_fallback(product, "max_amount")
+    fallback_amount = _to_int_or_none(fallback_amount)
+
+    # fallback은 실제 상품 한도를 알고 있는 경우에만 사용합니다.
+    # parsed_amount가 없거나, 잘못 크게 잡힌 경우에는 fallback 한도로 낮춥니다.
+    if fallback_amount is not None and (
+        parsed_amount is None or parsed_amount > fallback_amount
+    ):
+        return fallback_amount
+
+    return parsed_amount
+
+
+def _extract_product_min_amount(product: dict[str, Any]) -> int | None:
+    return (
+        _to_won_amount_or_none(product.get("min_amount"))
+        or _to_won_amount_or_none(product.get("min_monthly_amount"))
+        or _to_won_amount_or_none(product.get("min_deposit_amount"))
+        or _to_int_or_none(product.get("min_amount"))
+        or _to_int_or_none(product.get("min_monthly_amount"))
+        or _to_int_or_none(product.get("min_deposit_amount"))
+        or _to_int_or_none(_get_product_field_fallback(product, "min_amount"))
+    )
+
+
+def _is_deposit_product(product: dict[str, Any]) -> bool:
+    product_type = str(product.get("product_type") or "").strip()
+    product_name = str(product.get("product_name") or "").strip()
+
+    return product_type == "예금" or "예금" in product_name
+
+
+def _get_product_detail_map_cached() -> dict[str, dict[str, Any]]:
+    global _PRODUCT_DETAIL_MAP_CACHE
+
+    # 빈 dict를 영구 캐시하면 DB import/초기화 타이밍 문제 이후 계속 보강이 실패할 수 있으므로,
+    # 값이 있을 때만 캐시를 신뢰합니다.
+    if _PRODUCT_DETAIL_MAP_CACHE:
+        return _PRODUCT_DETAIL_MAP_CACHE
+
+    if get_product_detail_map is None:
+        return {}
+
+    try:
+        raw_map = get_product_detail_map()
+    except Exception:
+        return {}
+
+    if not isinstance(raw_map, dict):
+        return {}
+
+    normalized_map: dict[str, dict[str, Any]] = {}
+
+    for key, value in raw_map.items():
+        if not isinstance(value, dict):
+            continue
+
+        product_name = value.get("product_name") or key
+        lookup_keys = [
+            key,
+            product_name,
+            value.get("rag_document_key"),
+            value.get("source_file"),
+            value.get("file_name"),
+        ]
+
+        for lookup_key in lookup_keys:
+            normalized_key = _normalize_product_lookup_name(lookup_key)
+            if normalized_key:
+                normalized_map[normalized_key] = value
+
+    _PRODUCT_DETAIL_MAP_CACHE = normalized_map
+    return _PRODUCT_DETAIL_MAP_CACHE
+
+
+def _find_db_product_detail_for_candidate(product: dict[str, Any]) -> dict[str, Any] | None:
+    detail_map = _get_product_detail_map_cached()
+    if not detail_map:
+        return None
+
+    lookup_values = [
+        product.get("product_name"),
+        product.get("product_key"),
+        product.get("rag_document_key"),
+        product.get("source_file"),
+        product.get("file_name"),
+        product.get("document_name"),
+    ]
+
+    for value in lookup_values:
+        normalized_value = _normalize_product_lookup_name(value)
+        if normalized_value and isinstance(detail_map.get(normalized_value), dict):
+            return detail_map[normalized_value]
+
+    candidate_name = _normalize_product_lookup_name(product.get("product_name"))
+    if candidate_name:
+        for key, detail in detail_map.items():
+            if not isinstance(detail, dict):
+                continue
+
+            db_name = _normalize_product_lookup_name(detail.get("product_name") or key)
+            if db_name and (candidate_name in db_name or db_name in candidate_name):
+                return detail
+
+    return None
+
+
+def _apply_product_field_fallbacks(product: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(product or {})
+
+    for aliases, values in _PRODUCT_FIELD_FALLBACKS:
+        blob = _product_lookup_blob(enriched)
+        if not any(_normalize_product_lookup_name(alias) in blob for alias in aliases):
+            continue
+
+        for key, fallback_value in values.items():
+            current_value = enriched.get(key)
+
+            if key == "max_amount":
+                current_amount = _to_int_or_none(current_value)
+                fallback_amount = _to_int_or_none(fallback_value)
+                if fallback_amount is not None and (
+                    current_amount is None or current_amount > fallback_amount
+                ):
+                    enriched[key] = fallback_amount
+                continue
+
+            if current_value in (None, "", []):
+                enriched[key] = fallback_value
+
+    return enriched
+
+
+def _enrich_product_with_db_fields(product: dict[str, Any]) -> dict[str, Any]:
+    """
+    financial 계산에 필요한 기간/금리/금액 정보를 DB products 기준으로 보강합니다.
+    DB 매칭이 실패해도 주요 상품의 안전 fallback을 적용합니다.
+    """
+    enriched = dict(product or {})
+    db_detail = _find_db_product_detail_for_candidate(enriched)
+
+    if isinstance(db_detail, dict):
+        db_first_keys = [
+            "product_id",
+            "product_name",
+            "product_type",
+            "min_amount",
+            "max_amount",
+            "min_period_months",
+            "max_period_months",
+            "base_rate",
+            "max_rate",
+            "age_min",
+            "age_max",
+            "join_channel",
+            "rag_document_key",
+            "is_active",
+        ]
+
+        for key in db_first_keys:
+            value = db_detail.get(key)
+            if value not in (None, ""):
+                enriched[key] = value
+
+    enriched = _apply_product_field_fallbacks(enriched)
+    return enriched
+
+
+def _load_eligibility_status_by_product(state: AgentState) -> dict[str, dict[str, Any]]:
+    """eligibility_agent 결과를 상품명 기준으로 조회할 수 있게 만듭니다."""
+    results = state.get("eligibility_results") or []
+
+    if not results:
+        eligibility_result = state.get("eligibility_result") or {}
+        payload = eligibility_result.get("result") if isinstance(eligibility_result, dict) else {}
+        if isinstance(payload, dict):
+            results = payload.get("results") or []
+
+    mapping: dict[str, dict[str, Any]] = {}
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+
+        raw_names = [
+            item.get("product_name"),
+            item.get("name"),
+            item.get("product"),
+        ]
+
+        for raw_name in raw_names:
+            name = str(raw_name or "").strip()
+            if not name:
+                continue
+
+            mapping[name] = item
+
+            normalized_name = _normalize_product_lookup_name(name)
+            if normalized_name:
+                mapping[normalized_name] = item
+
+    return mapping
+
+
+def _get_eligibility_item_by_product_name(
+    eligibility_by_name: dict[str, dict[str, Any]],
+    product_name: str,
+) -> dict[str, Any] | None:
+    if not isinstance(eligibility_by_name, dict):
+        return None
+
+    if product_name in eligibility_by_name:
+        return eligibility_by_name[product_name]
+
+    normalized_name = _normalize_product_lookup_name(product_name)
+    if normalized_name in eligibility_by_name:
+        return eligibility_by_name[normalized_name]
+
+    for key, item in eligibility_by_name.items():
+        normalized_key = _normalize_product_lookup_name(key)
+        if normalized_name and normalized_key and (
+            normalized_name in normalized_key or normalized_key in normalized_name
+        ):
+            return item
+
+    return None
+
+
+def _ensure_financial_calculations(result: dict) -> dict:
+    """
+    기존 tool_results 기반 계산 파싱은 유지하되,
+    recommendation augmentation에서 만든 financial_results/calculations를 덮어 지우지 않습니다.
+    """
+    financial_result = result.get("financial_result")
+    if not isinstance(financial_result, dict):
+        return result
+
+    payload = financial_result.get("result", {})
+    if not isinstance(payload, dict):
+        return result
+
+    tool_results = payload.get("tool_results") or []
+    parsed_calculations = _parse_financial_calculations(tool_results)
+
+    existing_calculations = payload.get("calculations")
+    if not isinstance(existing_calculations, list):
+        existing_calculations = []
+
+    financial_results = payload.get("financial_results")
+    if not isinstance(financial_results, list):
+        financial_results = result.get("financial_results")
+    if not isinstance(financial_results, list):
+        financial_results = []
+
+    recommendation_calculations = [
+        item for item in financial_results
+        if isinstance(item, dict) and item.get("status") == "calculated"
+    ]
+
+    calculations = (
+        parsed_calculations
+        or recommendation_calculations
+        or existing_calculations
+    )
+
+    payload["calculations"] = calculations
+
+    if calculations:
+        if financial_results:
+            payload["missing_fields"] = []
+            payload["fallback_reason"] = None
+            if payload.get("status") in (None, "needs_check"):
+                payload["status"] = "success"
+            if financial_result.get("status") == "needs_check":
+                financial_result["status"] = "success"
+    else:
+        payload["missing_fields"] = payload.get("missing_fields") or ["term_months", "applied_rate"]
+        payload["fallback_reason"] = payload.get("fallback_reason") or "missing_required_calculation_fields"
+        if payload.get("status") == "success":
+            payload["status"] = "needs_check"
+        if financial_result.get("status") == "success":
+            financial_result["status"] = "needs_check"
+        if not payload.get("summary"):
+            payload["summary"] = "계산에 필요한 필수 정보가 부족하여 financial_result.calculations를 생성하지 못했습니다."
+
+    financial_result["result"] = payload
+    result["financial_result"] = financial_result
+
+    agent_outputs = dict(result.get("agent_outputs") or {})
+    if isinstance(agent_outputs.get("financial_agent"), dict):
+        agent_outputs["financial_agent"]["result"] = payload
+    result["agent_outputs"] = agent_outputs
+
+    return result
+
