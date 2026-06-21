@@ -1262,6 +1262,63 @@ def _build_customer_prompt_context(customer: dict) -> str:
     )
 
 
+def _build_customer_state_profile(customer: dict | None) -> dict | None:
+    """
+    Graph state에 넣을 구조화 고객 프로필을 만듭니다.
+
+    transaction_months는 고객의 은행 거래 개월 수이므로
+    희망 가입기간으로 오해되지 않도록 bank_transaction_months로만 전달합니다.
+    """
+    if not customer:
+        return None
+
+    profile = {
+        "customer_id": customer.get("customer_id"),
+        "customer_name": customer.get("customer_name"),
+        "age": _calculate_age(customer.get("birth_date")),
+        "job": customer.get("customer_job"),
+        "income": customer.get("annual_income"),
+        "income_level": customer.get("income_level"),
+        "monthly_saving_amount": customer.get("available_monthly_saving"),
+        "main_bank": bool(customer.get("main_bank_yn")),
+        "salary_transfer": bool(customer.get("salary_transfer_yn")),
+        "auto_transfer": bool(customer.get("auto_transfer_yn")),
+        "card_usage": bool(customer.get("card_usage_yn")),
+        "marketing_agree": bool(customer.get("marketing_agree_yn")),
+        "bank_transaction_months": customer.get("transaction_months"),
+        "customer_profile_source": "streamlit_dashboard",
+    }
+
+    profile["parsed_customer_fields"] = [
+        key
+        for key, value in profile.items()
+        if key not in {"parsed_customer_fields", "parsed_customer_values"}
+        and value not in (None, "", [])
+    ]
+    profile["parsed_customer_values"] = {
+        key: value
+        for key, value in profile.items()
+        if key not in {"parsed_customer_fields", "parsed_customer_values"}
+        and value not in (None, "", [])
+    }
+    return profile
+
+
+def _build_graph_context(target_customer: dict | None, customer_context: str | None) -> dict:
+    return {
+        "surface": "streamlit",
+        "customer_context_text": customer_context,
+        "response_guidance": (
+            "고객 본인이 이해하기 쉬운 말투로 답변하고, 우대조건은 충족/미충족/추가 확인 필요로 구분합니다."
+        ),
+        "important_note": (
+            "user_query는 사용자가 직접 입력한 질문만 의미합니다. "
+            "bank_transaction_months는 고객 거래 개월 수이며 희망 가입기간이 아닙니다."
+        ),
+        "selected_customer_id": target_customer.get("customer_id") if target_customer else None,
+    }
+
+
 def _render_chat_message(role: str, content: str) -> None:
     label = "나" if role == "user" else "AI 금융 도우미"
     bubble_class = "user" if role == "user" else "assistant"
@@ -1285,7 +1342,12 @@ def _run_assistant(prompt: str) -> str:
     if explicit_customer_id is not None:
         explicit_customer, _ = _fetch_customer_dashboard(str(explicit_customer_id))
         target_customer = explicit_customer
+
+    # user_query는 반드시 사용자가 직접 입력한 질문만 넣습니다.
+    # 고객 요약/거래 개월/가입 상품 정보는 context와 구조화 state로 따로 전달합니다.
+    user_query = prompt
     graph_prompt = prompt
+    customer_context = None
 
     if target_customer:
         customer_name = target_customer.get("customer_name")
@@ -1308,6 +1370,10 @@ def _run_assistant(prompt: str) -> str:
 
     st.session_state.conversation_messages = graph_messages
 
+    customer_profile = _build_customer_state_profile(target_customer)
+    customer_accounts = target_customer.get("accounts", []) if target_customer else []
+    graph_context = _build_graph_context(target_customer, customer_context)
+
     with langfuse_trace_context(
         trace_name="streamlit-chat-turn",
         session_id=st.session_state.langfuse_session_id,
@@ -1321,18 +1387,23 @@ def _run_assistant(prompt: str) -> str:
             name="streamlit_chat_turn",
             as_type="span",
             input={
+                "user_query": user_query,
                 "prompt": graph_prompt,
                 "conversation_length": len(graph_messages),
+                "customer_id": target_customer.get("customer_id") if target_customer else explicit_customer_id,
             },
             metadata={"surface": "streamlit"},
         ) as observation:
             result = st.session_state.graph.invoke(
                 {
                     "messages": graph_messages,
+                    "user_query": user_query,
                     "next": "",
                     "member_id": str(target_customer.get("customer_id")) if target_customer else None,
                     "customer_id": target_customer.get("customer_id") if target_customer else explicit_customer_id,
-                    "context": None,
+                    "customer_profile": customer_profile,
+                    "customer_accounts": customer_accounts,
+                    "context": graph_context,
                     "plan": [],
                     "current_step": 0,
                     "agent_outputs": {},

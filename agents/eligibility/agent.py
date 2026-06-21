@@ -23,6 +23,10 @@ from agents.eligibility.tools import (
 from graph.state import AgentState
 from observability.langfuse import langfuse_observation, update_observation
 
+try:
+    from agents.product.tools import get_product_detail_map
+except Exception:
+    get_product_detail_map = None
 
 REQUIRED_PROFILE_FIELDS = {
     "age": "age",
@@ -421,6 +425,10 @@ def _build_guarded_eligibility_results(
         return results, fallback_notes
 
     for product in product_candidates:
+        if not isinstance(product, dict):
+            continue
+
+        product = _enrich_product_with_db_fields(product)
         product_name = str(product.get("product_name") or "미확인 상품").strip()
         invalid_reasons = _validate_product_name(product_name)
 
@@ -441,9 +449,28 @@ def _build_guarded_eligibility_results(
             )
             continue
 
-        base_result = evaluate_product_eligibility(customer_profile, customer_accounts, product)
+        evaluation_profile, amount_cap_note = _prepare_profile_for_product_eligibility(
+            customer_profile,
+            product,
+            user_constraints,
+        )
+
+        base_result = evaluate_product_eligibility(evaluation_profile, customer_accounts, product)
         guarded_result = _normalize_eligibility_result(base_result)
         guarded_result["source_agent"] = "eligibility_agent"
+
+        if amount_cap_note:
+            guarded_result["calculation_notes"] = _merge_unique_lists(
+                guarded_result.get("calculation_notes", []),
+                [amount_cap_note],
+            )
+        job_constraint_notes = _apply_job_specific_constraints(
+            guarded_result,
+            product,
+            customer_profile,
+        )
+        if job_constraint_notes:
+            fallback_notes.extend(job_constraint_notes)
 
         if profile_missing_fields and guarded_result["status"] == "eligible":
             fallback_notes.append("customer_profile_incomplete")
@@ -520,10 +547,11 @@ def _extract_user_constraints(state: AgentState) -> dict[str, Any]:
     사용자 발화에서 납입금액과 기간 같은 명시 조건만 추출합니다.
 
     주의:
-    - transaction_months는 고객 거래기간이므로 계약기간으로 쓰지 않습니다.
+    - transaction_months, bank_transaction_months는 고객 거래기간이므로 계약기간으로 쓰지 않습니다.
+    - customer_accounts.contract_months는 기존 가입계좌의 계약기간이므로 신규 희망기간으로 쓰지 않습니다.
     - 기간은 사용자가 '2년', '24개월'처럼 직접 말한 경우에만 추출합니다.
     """
-    user_query = str(state.get("user_query") or _get_last_user_text(state.get("messages") or []))
+    user_query = _get_explicit_user_query(state)
     normalized = user_query.replace(",", "").replace(" ", "")
 
     monthly_amount = None
@@ -536,15 +564,7 @@ def _extract_user_constraints(state: AgentState) -> dict[str, Any]:
         if amount_match:
             monthly_amount = int(amount_match.group(1))
 
-    period_months = None
-
-    year_match = re.search(r"([0-9]{1,2})년", normalized)
-    if year_match:
-        period_months = int(year_match.group(1)) * 12
-    else:
-        period_match = re.search(r"([0-9]{1,2})개월", normalized)
-        if period_match:
-            period_months = int(period_match.group(1))
+    period_months = _extract_period_months_from_query(user_query)
 
     return {
         "monthly_amount": monthly_amount,
@@ -552,6 +572,200 @@ def _extract_user_constraints(state: AgentState) -> dict[str, Any]:
         "raw_query": user_query,
     }
 
+
+def _get_explicit_user_query(state: AgentState) -> str:
+    """
+    eligibility 조건 추출에는 실제 사용자 발화만 사용한다.
+
+    state["user_query"]에 customer_profile, agent_outputs, debug text가 섞이면
+    transaction_months=39 같은 고객 거래기간이 '39개월 희망기간'으로 오해될 수 있다.
+    따라서 마지막 HumanMessage를 우선 사용하고, 불가피하게 state["user_query"]를 쓰더라도
+    agent/debug/profile 라인은 제거한다.
+    """
+    last_user_text = _get_last_user_text(state.get("messages") or [])
+    state_user_query = str(state.get("user_query") or "")
+
+    raw_query = last_user_text or state_user_query
+    return _strip_non_user_context(raw_query)
+
+
+def _strip_non_user_context(text: str) -> str:
+    """
+    사용자 질문 문자열에 섞인 프로필/디버그/에이전트 결과 라인을 제거한다.
+    정상적인 짧은 사용자 질문은 그대로 반환한다.
+    """
+    source = _normalize_summary_text(str(text or "")).strip()
+    if not source:
+        return ""
+
+    # user_query: "..." 또는 사용자 질문: ... 형태가 있으면 해당 라인을 우선 사용한다.
+    explicit_query_patterns = [
+        r"(?:user_query|사용자\s*질문|질문)\s*[:=]\s*[\"']?([^\n\"']+)",
+    ]
+    for pattern in explicit_query_patterns:
+        match = re.search(pattern, source, flags=re.IGNORECASE)
+        if match:
+            candidate = match.group(1).strip()
+            if candidate:
+                return candidate
+
+    blocked_markers = [
+        "transaction_months",
+        "bank_transaction_months",
+        "contract_months",
+        "remaining_months",
+        "term_months",
+        "customer_profile",
+        "customer_accounts",
+        "product_candidates",
+        "agent_outputs",
+        "customer_result",
+        "product_result",
+        "financial_result",
+        "eligibility_result",
+        "거래개월",
+        "거래 개월",
+        "거래기간",
+        "거래 기간",
+        "기존 가입",
+        "가입계좌",
+        "가입 계좌",
+        "만기일",
+        "maturity_date",
+    ]
+
+    cleaned_lines: list[str] = []
+    for line in source.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lowered = stripped.lower()
+        if any(marker.lower() in lowered for marker in blocked_markers):
+            continue
+        cleaned_lines.append(stripped)
+
+    if cleaned_lines:
+        return " ".join(cleaned_lines).strip()
+
+    return source
+
+
+def _extract_period_months_from_query(user_query: str) -> int | None:
+    """
+    사용자 질문에 명시된 신규 가입 희망기간만 추출한다.
+
+    고객 거래기간(transaction_months), 기존 계좌 계약기간(contract_months),
+    남은 기간(remaining_months) 주변에서 발견된 '39개월' 같은 숫자는 무시한다.
+    """
+    normalized = str(user_query or "").replace(",", "")
+    normalized = re.sub(r"\s+", "", normalized)
+    if not normalized:
+        return None
+
+    for match in re.finditer(r"([0-9]{1,2})년", normalized):
+        if _is_customer_or_account_period_context(normalized, match.start(), match.end()):
+            continue
+        return int(match.group(1)) * 12
+
+    for match in re.finditer(r"([0-9]{1,2})개월", normalized):
+        if _is_customer_or_account_period_context(normalized, match.start(), match.end()):
+            continue
+        return int(match.group(1))
+
+    return None
+
+
+def _is_customer_or_account_period_context(text: str, start: int, end: int) -> bool:
+    """
+    기간 숫자 주변에 고객 거래기간/기존 계좌기간을 의미하는 단어가 있으면
+    사용자 희망기간으로 보지 않는다.
+    """
+    window = text[max(0, start - 30): min(len(text), end + 30)].lower()
+    blocked_contexts = [
+        "transaction_months",
+        "bank_transaction_months",
+        "contract_months",
+        "remaining_months",
+        "term_months",
+        "거래개월",
+        "거래기간",
+        "은행거래",
+        "고객거래",
+        "기존계좌",
+        "가입계좌",
+        "만기까지",
+        "남은기간",
+    ]
+    return any(marker.lower() in window for marker in blocked_contexts)
+
+def _to_int_or_none(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+
+    if isinstance(value, (int, float)):
+        return int(value)
+
+    text = str(value).replace(",", "").strip()
+    if not text:
+        return None
+
+    match = re.search(r"\d+", text)
+    if not match:
+        return None
+
+    return int(match.group(0))
+
+
+def _prepare_profile_for_product_eligibility(
+    customer_profile: dict[str, Any],
+    product: dict[str, Any],
+    user_constraints: dict[str, Any],
+) -> tuple[dict[str, Any], str | None]:
+    """
+    추천 흐름에서 DB의 월 저축 가능액은 '총 저축 가능액'이다.
+    따라서 이 값이 상품별 월 납입한도보다 커도 가입 불가가 아니라,
+    해당 상품 한도만큼 납입하는 것으로 판단한다.
+
+    단, 사용자가 직접 '월 70만원 넣겠다'처럼 명시한 금액은 희망 납입액이므로
+    _apply_user_constraints에서 별도로 한도 초과 여부를 판단한다.
+    """
+    profile = dict(customer_profile or {})
+
+    # 사용자가 직접 월 납입액을 말한 경우에는 cap 하지 않는다.
+    # 예: "월 70만원씩 넣고 싶어" → 상품 한도 초과 안내가 필요함.
+    if user_constraints.get("monthly_amount") is not None:
+        return profile, None
+
+    customer_monthly_amount = _to_int_or_none(
+        profile.get("monthly_saving_amount")
+        or profile.get("available_monthly_saving")
+    )
+
+    if customer_monthly_amount is None:
+        return profile, None
+
+    _, product_max_amount = _extract_amount_bounds(product)
+
+    if product_max_amount is None:
+        return profile, None
+
+    if customer_monthly_amount <= product_max_amount:
+        return profile, None
+
+    profile["available_monthly_saving"] = customer_monthly_amount
+    profile["monthly_saving_amount"] = product_max_amount
+    profile["monthly_amount_cap_applied"] = True
+    profile["monthly_amount_before_cap"] = customer_monthly_amount
+    profile["monthly_amount_after_cap"] = product_max_amount
+
+    product_name = str(product.get("product_name") or "해당 상품").strip()
+    note = (
+        f"고객님의 월 저축 가능액은 {customer_monthly_amount:,}원이지만, "
+        f"{product_name}의 월 납입한도가 {product_max_amount:,}원이므로 "
+        f"가입 가능 여부는 월 {product_max_amount:,}원 기준으로 판단했습니다."
+    )
+
+    return profile, note
 
 def _apply_user_constraints(result: dict[str, Any], product: dict, user_constraints: dict[str, Any]) -> list[str]:
     fallback_notes: list[str] = []
@@ -598,6 +812,126 @@ def _apply_user_constraints(result: dict[str, Any], product: dict, user_constrai
             )
 
     return fallback_notes
+
+
+def _apply_job_specific_constraints(
+    result: dict[str, Any],
+    product: dict[str, Any],
+    customer_profile: dict[str, Any],
+) -> list[str]:
+    """
+    군인/장병/간부 등 특정 직군 대상 상품은 고객 직업과 반드시 대조합니다.
+
+    evaluate_product_eligibility가 일반 조건만 통과시켜도,
+    KB나라사랑적금(직업군인용), KB장병내일준비적금, 장기간부 적금처럼
+    가입대상이 제한된 상품은 여기서 한 번 더 hard gate로 차단합니다.
+    """
+    if not _is_military_only_product(product):
+        return []
+
+    job = _clean_text_value(customer_profile.get("job"))
+    target_label = _military_product_target_label(product)
+
+    if not job:
+        result["eligible"] = False
+        result["status"] = "needs_check"
+        result["missing_fields"] = _merge_unique_lists(
+            result.get("missing_fields", []),
+            ["job"],
+        )
+        result["check_required"] = _merge_unique_lists(
+            result.get("check_required", []),
+            ["job"],
+        )
+        result["reasons"] = _merge_unique_lists(
+            result.get("reasons", []),
+            [f"{target_label} 상품으로 보이나 고객 직업 정보가 없어 가입 가능 여부를 확정할 수 없습니다."],
+        )
+        return ["job_condition_needs_check"]
+
+    if not _customer_is_soldier(customer_profile):
+        reason = f"고객 직업이 '{job}'이므로 {target_label} 상품 가입 대상이 아닙니다."
+        result["eligible"] = False
+        result["status"] = "rejected"
+        result["reasons"] = _merge_unique_lists(result.get("reasons", []), [reason])
+        result["ineligibility_reasons"] = _merge_unique_lists(
+            result.get("ineligibility_reasons", []),
+            [reason],
+        )
+        return ["job_mismatch"]
+
+    return []
+
+
+def _is_military_only_product(product: dict[str, Any]) -> bool:
+    """군인/장병/간부 등 특정 직군 대상 상품 여부를 상품명·DB key·RAG 본문으로 판정합니다."""
+    text = _product_constraint_text(product)
+    normalized = re.sub(r"\s+", "", text).lower()
+
+    # 상품명 또는 문서키만으로도 특정 군 관련 상품임이 명확한 경우.
+    # 여기에는 가입대상 문구가 raw_text에 없어도 hard gate를 적용해야 합니다.
+    hard_keywords = [
+        "kb나라사랑적금",
+        "나라사랑적금",
+        "직업군인용",
+        "직업군인전용",
+        "군인용",
+        "군인전용",
+        "kb장병내일준비적금",
+        "장병내일준비적금",
+        "장병내일준비",
+        "장기간부적금",
+        "장기간부",
+        "장기복무",
+        "군간부전용",
+        "군간부",
+    ]
+    if any(keyword in normalized for keyword in hard_keywords):
+        return True
+
+    # 상품 설명에 가입대상/가입조건 표현과 군 관련 표현이 함께 있으면 군 관련 제한 상품으로 본다.
+    target_markers = ["가입대상", "가입조건", "대상고객", "가입가능", "전용", "대상"]
+    soldier_markers = ["직업군인", "군인", "장병", "장교", "부사관", "간부", "군간부"]
+    return any(marker in text for marker in target_markers) and any(marker in text for marker in soldier_markers)
+
+
+def _military_product_target_label(product: dict[str, Any]) -> str:
+    """고객에게 보여줄 군 관련 상품 대상 표현을 상품명 기준으로 조금 더 정확히 만든다."""
+    normalized = re.sub(r"\s+", "", _product_constraint_text(product)).lower()
+
+    if "장기간부" in normalized or "군간부" in normalized or "장기복무" in normalized:
+        return "군 간부 등 특정 직군 대상"
+    if "장병내일준비" in normalized or "장병" in normalized:
+        return "장병 등 특정 직군 대상"
+    if "나라사랑" in normalized or "직업군인" in normalized:
+        return "직업군인 등 특정 직군 대상"
+    return "군인·장병·간부 등 특정 직군 대상"
+
+
+def _product_constraint_text(product: dict[str, Any]) -> str:
+    return " ".join(
+        str(product.get(key) or "")
+        for key in [
+            "product_name",
+            "product_target",
+            "join_target",
+            "eligibility",
+            "rag_document_key",
+            "raw_text",
+        ]
+    )
+
+
+def _customer_is_soldier(customer_profile: dict[str, Any]) -> bool:
+    is_soldier = customer_profile.get("is_soldier")
+    if isinstance(is_soldier, bool):
+        return is_soldier
+
+    job = _clean_text_value(customer_profile.get("job"))
+    if not job:
+        return False
+
+    return bool(re.search(r"(직업군인|군인|장교|부사관|하사|중사|상사|원사|대위|소령|중령|대령)", job))
 
 
 def _find_missing_profile_fields(customer_profile: dict[str, Any]) -> list[str]:
@@ -740,40 +1074,185 @@ def _enrich_customer_profile(customer_profile: dict[str, Any], *, source: str) -
 
     return profile
 
+# helper
+_PRODUCT_DETAIL_MAP_CACHE: dict[str, dict[str, Any]] | None = None
+
+
+def _normalize_product_lookup_name(name: Any) -> str:
+    return re.sub(r"\s+", "", str(name or "")).lower()
+
+
+def _get_product_detail_map_cached() -> dict[str, dict[str, Any]]:
+    global _PRODUCT_DETAIL_MAP_CACHE
+
+    if _PRODUCT_DETAIL_MAP_CACHE is not None:
+        return _PRODUCT_DETAIL_MAP_CACHE
+
+    if get_product_detail_map is None:
+        _PRODUCT_DETAIL_MAP_CACHE = {}
+        return _PRODUCT_DETAIL_MAP_CACHE
+
+    try:
+        raw_map = get_product_detail_map()
+    except Exception:
+        _PRODUCT_DETAIL_MAP_CACHE = {}
+        return _PRODUCT_DETAIL_MAP_CACHE
+
+    if not isinstance(raw_map, dict):
+        _PRODUCT_DETAIL_MAP_CACHE = {}
+        return _PRODUCT_DETAIL_MAP_CACHE
+
+    normalized_map: dict[str, dict[str, Any]] = {}
+
+    for key, value in raw_map.items():
+        if isinstance(value, dict):
+            product_name = value.get("product_name") or key
+            normalized_map[_normalize_product_lookup_name(product_name)] = value
+            normalized_map[_normalize_product_lookup_name(key)] = value
+
+    _PRODUCT_DETAIL_MAP_CACHE = normalized_map
+    return _PRODUCT_DETAIL_MAP_CACHE
+
+
+def _enrich_product_with_db_fields(product: dict[str, Any]) -> dict[str, Any]:
+    """
+    RAG에서 넘어온 상품 후보에 DB products 정형값을 보강합니다.
+    추천/가입가능성 판단은 raw_text보다 DB 정형값을 우선 사용합니다.
+    """
+    enriched = dict(product or {})
+    product_name = enriched.get("product_name")
+
+    detail_map = _get_product_detail_map_cached()
+    db_detail = detail_map.get(_normalize_product_lookup_name(product_name))
+
+    if not isinstance(db_detail, dict):
+        return enriched
+
+    db_first_keys = [
+        "product_id",
+        "product_name",
+        "product_type",
+        "min_amount",
+        "max_amount",
+        "min_period_months",
+        "max_period_months",
+        "base_rate",
+        "max_rate",
+        "age_min",
+        "age_max",
+        "join_channel",
+        "rag_document_key",
+        "is_active",
+    ]
+
+    for key in db_first_keys:
+        value = db_detail.get(key)
+        if value not in (None, ""):
+            enriched[key] = value
+
+    return enriched
 
 def _find_missing_product_requirements(product: dict[str, Any]) -> list[str]:
-    raw_text = str(product.get("raw_text") or "")
-    lowered = raw_text.lower()
-    missing_fields = []
+    """
+    상품 가입조건 누락 여부를 확인합니다.
 
-    if not any(token in raw_text for token in ["가입대상", "가입 대상", "군인", "직업", "전용"]):
+    원칙:
+    - 일반 예금/적금은 DB 정형값으로 금액, 기간, 연령 조건을 확인할 수 있으면
+      product_target 문구가 없다는 이유만으로 needs_check 처리하지 않습니다.
+    - 군인/장병/간부/직업군인 전용처럼 특정 대상 상품만 가입대상/직업조건 근거를 엄격히 봅니다.
+    """
+    missing_fields: list[str] = []
+
+    if not _is_special_target_product(product):
+        return []
+
+    raw_text = str(product.get("raw_text") or "")
+    target_text = " ".join(
+        str(product.get(key) or "")
+        for key in [
+            "product_name",
+            "product_target",
+            "join_target",
+            "eligibility",
+            "rag_document_key",
+            "raw_text",
+        ]
+    )
+
+    if not any(
+        token in target_text
+        for token in ["가입대상", "가입 대상", "대상고객", "군인", "장병", "간부", "직업군인", "전용"]
+    ):
         missing_fields.append("product_target")
-    if not any(token in raw_text for token in ["만", "세", "연령", "나이"]):
-        missing_fields.append("product_age_condition")
-    if not any(token in lowered for token in ["직업", "군인", "대상", "전용", "가입 가능"]):
+
+    if _is_job_sensitive_product(product) and not any(
+        token in target_text
+        for token in ["직업", "군인", "장병", "간부", "직업군인", "전용", "가입 가능"]
+    ):
         missing_fields.append("product_job_condition")
 
     return _dedupe(missing_fields)
 
 
-def _extract_age_from_summary(raw_text: str) -> int | None:
-    patterns = [
-        r"생년월일[^\n]*\(\s*현재\s*연령[:\s|]*([0-9]{1,2})\s*세\s*\)",
-        r"생년월일[^\n]*연령[:\s|]*\d{4}-\d{2}-\d{2}[^\n]*\(([0-9]{1,2})\s*세\)",
-        r"\d{4}-\d{2}-\d{2}\s*\(([0-9]{1,2})",
-        r"(현재\s*연령|연령|나이)[:\s|]*([0-9]{1,2})(?:\s*세)?",
+def _is_special_target_product(product: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(product.get(key) or "")
+        for key in [
+            "product_name",
+            "product_target",
+            "join_target",
+            "eligibility",
+            "rag_document_key",
+            "raw_text",
+        ]
+    )
+    normalized = re.sub(r"\s+", "", text).lower()
+
+    special_keywords = [
+        "군인",
+        "직업군인",
+        "장병",
+        "장병내일준비",
+        "나라사랑",
+        "장기간부",
+        "군간부",
+        "간부",
+        "청년",
+        "청년도약",
+        "소상공인",
+        "사업자",
     ]
 
-    for pattern in patterns:
-        match = re.search(pattern, raw_text)
-        if not match:
-            continue
-        # 패턴마다 캡처 그룹 수가 다르므로 마지막 숫자 그룹을 사용합니다.
-        for group in reversed(match.groups()):
-            digits = re.sub(r"[^0-9]", "", str(group))
-            if digits:
-                return int(digits)
-    return None
+    return any(keyword in normalized for keyword in special_keywords)
+
+
+def _is_job_sensitive_product(product: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(product.get(key) or "")
+        for key in [
+            "product_name",
+            "product_target",
+            "join_target",
+            "eligibility",
+            "rag_document_key",
+            "raw_text",
+        ]
+    )
+    normalized = re.sub(r"\s+", "", text).lower()
+
+    job_keywords = [
+        "군인",
+        "직업군인",
+        "장병",
+        "나라사랑",
+        "장기간부",
+        "군간부",
+        "간부",
+        "소상공인",
+        "사업자",
+    ]
+
+    return any(keyword in normalized for keyword in job_keywords)
 
 
 def _extract_birth_date_from_summary(raw_text: str) -> str | None:
@@ -1010,10 +1489,27 @@ def _extract_amount_bounds(product: dict[str, Any]) -> tuple[int | None, int | N
     return min_amount, max_amount
 
 def _extract_period_bounds(product: dict[str, Any]) -> tuple[int | None, int | None]:
+    period_min = (
+        _to_int_or_none(product.get("min_period_months"))
+        or _to_int_or_none(product.get("min_period"))
+        or _to_int_or_none(product.get("min_contract_months"))
+    )
+
+    period_max = (
+        _to_int_or_none(product.get("max_period_months"))
+        or _to_int_or_none(product.get("max_period"))
+        or _to_int_or_none(product.get("max_contract_months"))
+    )
+
+    if period_min is not None or period_max is not None:
+        return period_min, period_max
+
     raw_text = str(product.get("raw_text") or "")
     months = [int(match) for match in re.findall(r"([0-9]{1,2})\s*개월", raw_text)]
+
     if not months:
         return None, None
+
     return min(months), max(months)
 
 

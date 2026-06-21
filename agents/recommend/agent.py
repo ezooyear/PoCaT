@@ -58,6 +58,37 @@ def recommend_agent_node(state: AgentState) -> dict:
                 )
 
             normalized_results = _normalize_eligibility_results(eligibility_results)
+            # 디버깅
+            print("\n[RECOMMEND DEBUG]")
+            print("product_candidates =", [
+                p.get("product_name")
+                for p in product_candidates
+                if isinstance(p, dict)
+            ])
+            print("eligibility_results =", [
+                {
+                    "name": e.get("product_name"),
+                    "status": e.get("status"),
+                    "eligible": e.get("eligible"),
+                    "reasons": e.get("reasons") or e.get("ineligibility_reasons"),
+                    "missing": e.get("missing_fields") or e.get("check_required"),
+                }
+                for e in eligibility_results
+                if isinstance(e, dict)
+            ])
+            print("financial_results =", [
+                {
+                    "name": f.get("product_name"),
+                    "status": f.get("status"),
+                    "monthly_amount": f.get("monthly_amount"),
+                    "term_months": f.get("term_months"),
+                    "estimated_interest": f.get("estimated_interest"),
+                    "maturity_amount": f.get("maturity_amount"),
+                }
+                for f in financial_results
+                if isinstance(f, dict)
+            ])
+            print("[/RECOMMEND DEBUG]\n")
             recommendations, excluded_products, status, fallback_reason, required_next_steps = _build_guarded_recommendations(
                 normalized_results=normalized_results,
                 product_candidates=product_candidates,
@@ -82,11 +113,37 @@ def recommend_agent_node(state: AgentState) -> dict:
                         "reason": item.get("reason") or "추천 사유가 생성되지 않았습니다.",
                         "eligibility_status": item.get("status") or "eligible",
                         "applied_rate": item.get("applied_rate") or item.get("base_rate"),
+                        "monthly_amount": item.get("monthly_amount"),
+                        "term_months": item.get("term_months"),
+                        "total_principal": item.get("total_principal"),
+                        "payment_plan_text": item.get("payment_plan_text"),
+                        "calculation_assumption": item.get("calculation_assumption"),
+                        "monthly_amount_source": item.get("monthly_amount_source"),
+                        "monthly_amount_source_label": item.get("monthly_amount_source_label"),
+                        "term_months_source": item.get("term_months_source"),
+                        "term_months_source_label": item.get("term_months_source_label"),
                         "estimated_maturity_amount": item.get("maturity_amount"),
-                        "estimated_interest_before_tax": item.get("estimated_interest"),
+                        "estimated_interest_after_tax": item.get("estimated_interest"),
+                        "estimated_interest_before_tax": item.get("before_tax_interest"),
                         "warnings": item.get("warnings") or [],
                         "source_product_name": item.get("product_name"),
-                        **{k: v for k, v in item.items() if k not in {"rank", "product_name", "product_type", "status", "reason", "applied_rate", "maturity_amount", "estimated_interest", "warnings"}},
+                        **{
+                            k: v
+                            for k, v in item.items()
+                            if k
+                            not in {
+                                "rank",
+                                "product_name",
+                                "product_type",
+                                "status",
+                                "reason",
+                                "applied_rate",
+                                "maturity_amount",
+                                "estimated_interest",
+                                "before_tax_interest",
+                                "warnings",
+                            }
+                        },
                     }
                 )
 
@@ -144,6 +201,7 @@ def recommend_agent_node(state: AgentState) -> dict:
                             {
                                 "product_name": item.get("product_name"),
                                 "score": item.get("score"),
+                                "payment_plan_text": item.get("payment_plan_text"),
                                 "reason": (item.get("reason") or "")[:200],
                             }
                             for item in recommendations[:5]
@@ -259,7 +317,21 @@ def _load_financial_results(state: AgentState, agent_outputs: dict) -> list[dict
 def _extract_financial_results_from_container(container: Any) -> list[dict]:
     if isinstance(container, dict):
         payload = container.get("result", {})
-        tool_results = payload.get("tool_results", []) if isinstance(payload, dict) else []
+        if isinstance(payload, dict):
+            # financial_agent가 추천 흐름에서 만든 구조화 결과를 가장 먼저 사용합니다.
+            # 이 경로에 monthly_amount, term_months, total_principal, source label 등이 들어 있습니다.
+            financial_results = payload.get("financial_results")
+            if isinstance(financial_results, list) and any(isinstance(item, dict) for item in financial_results):
+                return [dict(item) for item in financial_results if isinstance(item, dict)]
+
+            calculations = payload.get("calculations")
+            if isinstance(calculations, list) and any(isinstance(item, dict) for item in calculations):
+                return [dict(item) for item in calculations if isinstance(item, dict)]
+
+            tool_results = payload.get("tool_results", [])
+        else:
+            tool_results = []
+
         extracted_results = []
         for item in tool_results:
             if not isinstance(item, dict):
@@ -302,7 +374,6 @@ def _normalize_eligibility_results(eligibility_results: list[dict]) -> list[dict
             }
         )
     return normalized
-
 
 def _build_guarded_recommendations(
     *,
@@ -432,25 +503,26 @@ def _build_guarded_recommendation_summary(
             rejected_items,
         )
 
-    lines = ["확정 추천을 생성하지 않았습니다."]
+    lines = ["현재 조건만으로 바로 추천드릴 수 있는 상품은 확인되지 않았습니다."]
 
     if fallback_reason == "eligibility_results_missing":
-        lines.append("- 가입 가능 여부 결과가 없어 추천을 보류했습니다.")
+        lines.append("- 가입 가능 여부를 확인하지 못해 추천을 잠시 보류했습니다.")
     elif fallback_reason == "product_candidates_missing":
-        lines.append("- 상품 후보 정보가 없어 추천을 보류했습니다.")
+        lines.append("- 비교할 상품 후보를 찾지 못해 추천을 잠시 보류했습니다.")
     elif fallback_reason == "financial_results_missing":
-        lines.append("- 금융 계산 결과가 없어 금액 기반 추천을 보류했습니다.")
+        lines.append("- 예상 이자 계산 결과가 없어 금액 기준 추천을 보류했습니다.")
     elif fallback_reason in {"no_eligible_product", "no_valid_eligible_product"}:
-        lines.append("- 추천 가능한 eligible 상품이 없어 억지 추천을 하지 않았습니다.")
+        pass
     elif fallback_reason:
-        lines.append(f"- fallback reason: {fallback_reason}")
+        lines.append(f"- 추가 확인 사유: {fallback_reason}")
 
     if excluded_products:
         lines.append("")
-        lines.append("제외된 상품:")
+        lines.append("이번 추천에서 제외한 상품:")
         for item in excluded_products:
-            lines.append(f"- {item.get('product_name', '미확인 상품')}: {item.get('status')} / {item.get('reason', '-')}")
-
+            if not isinstance(item, dict):
+                continue
+            lines.append(_format_excluded_product_for_customer(item))
     return "\n".join(lines)
 
 
@@ -559,3 +631,28 @@ def _build_trace_output(
         payload.update(extra_output)
 
     return payload
+
+
+def _format_excluded_product_for_customer(item: dict) -> str:
+    product_name = str(item.get("product_name") or "미확인 상품").strip()
+    reason = str(item.get("reason") or "").strip()
+
+    return f"- {product_name}: {_soften_excluded_reason(reason)}"
+
+
+def _soften_excluded_reason(reason: str) -> str:
+    text = str(reason or "").strip()
+
+    if not text or text in {"rejected", "invalid_product", "needs_check"}:
+        return "현재 확인된 조건과 맞지 않아 이번 추천에서 제외했습니다."
+
+    if "군 간부" in text or "장기간부" in text or "간부" in text:
+        return "군 간부 등 특정 직군 대상 상품으로 확인되어, 현재 고객님의 직업 조건과 맞지 않아 이번 추천에서 제외했습니다."
+
+    if "직업군인" in text or "나라사랑" in text or "군인" in text:
+        return "직업군인 등 특정 직군 대상 상품으로 확인되어, 현재 고객님의 직업 조건과 맞지 않아 이번 추천에서 제외했습니다."
+
+    if "상품 가입조건을 충분히 확인할 수 없어" in text:
+        return "가입 대상이나 세부 조건 확인이 필요해 이번에는 확정 추천에 포함하지 않았습니다."
+
+    return text

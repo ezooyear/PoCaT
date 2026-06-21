@@ -97,13 +97,7 @@ def _plan_mode(state: AgentState) -> dict:
 
 
 
-    # 디버깅
-    print("\n[SUPERVISOR DEBUG]")
-    print("state.user_query =", repr(state.get("user_query")))
-    print("messages =", repr(state_messages))
-    print("extracted user_query =", repr(user_query))
-    print("normalized_query =", repr(normalized_query))
-    print("[/SUPERVISOR DEBUG]\n")
+    
         # 1차: 규칙 기반 routing
     if (
         "추천" in normalized_query

@@ -11,6 +11,10 @@ from agents.base import run_agent_loop
 from agents.financial.prompts import FINANCIAL_SYSTEM_PROMPT
 from agents.financial.tools import FINANCIAL_TOOLS, compare_switch_benefit
 
+try:
+    from agents.product.tools import get_product_detail_map
+except Exception:
+    get_product_detail_map = None
 
 DEFAULT_TAX_RATE = 0.154
 
@@ -703,24 +707,226 @@ def _select_rate_for_term(product: dict[str, Any], term_months: int | None) -> f
         or _to_float_or_none(product.get("base_rate"))
     )
 
+def _to_int_or_none(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+
+    if isinstance(value, (int, float)):
+        return int(value)
+
+    text = str(value).replace(",", "").strip()
+    if not text:
+        return None
+
+    match = re.search(r"\d+", text)
+    if not match:
+        return None
+
+    return int(match.group(0))
+
+
+def _is_deposit_product(product: dict[str, Any]) -> bool:
+    product_type = str(product.get("product_type") or "").strip()
+    product_name = str(product.get("product_name") or "").strip()
+
+    return product_type == "예금" or "예금" in product_name
+
+
+def _extract_product_max_amount(product: dict[str, Any]) -> int | None:
+    return (
+        _to_int_or_none(product.get("max_amount"))
+        or _to_int_or_none(product.get("max_monthly_amount"))
+        or _to_int_or_none(product.get("max_deposit_amount"))
+    )
+
+
+def _extract_product_min_amount(product: dict[str, Any]) -> int | None:
+    return (
+        _to_int_or_none(product.get("min_amount"))
+        or _to_int_or_none(product.get("min_monthly_amount"))
+        or _to_int_or_none(product.get("min_deposit_amount"))
+    )
+
+
+def _resolve_recommendation_monthly_amount(
+    *,
+    product: dict[str, Any],
+    customer_profile: dict[str, Any],
+    requested_monthly_amount: int | None,
+) -> tuple[int | None, str, str | None]:
+    """
+    추천 계산용 월 납입액을 결정한다.
+
+    - 사용자가 직접 월 납입액을 말한 경우: 그 값을 우선 사용
+    - 사용자가 말하지 않은 경우: 고객 DB의 월 저축 가능액 사용
+    - 단, 상품별 월 납입한도가 있으면 그 한도까지만 계산
+    """
+    product_max_amount = _extract_product_max_amount(product)
+
+    if requested_monthly_amount is not None:
+        if product_max_amount is not None and requested_monthly_amount > product_max_amount:
+            return (
+                product_max_amount,
+                "user_query_capped_by_product_limit",
+                (
+                    f"입력하신 월 납입액은 {requested_monthly_amount:,}원이지만, "
+                    f"이 상품의 월 납입한도가 {product_max_amount:,}원이므로 "
+                    f"월 {product_max_amount:,}원 기준으로 계산했습니다."
+                ),
+            )
+
+        return requested_monthly_amount, "user_query", None
+
+    customer_monthly_amount = _to_int_or_none(
+        customer_profile.get("monthly_saving_amount")
+        or customer_profile.get("available_monthly_saving")
+    )
+
+    if customer_monthly_amount is None:
+        return None, "missing", None
+
+    if product_max_amount is not None and customer_monthly_amount > product_max_amount:
+        return (
+            product_max_amount,
+            "customer_db_capped_by_product_limit",
+            (
+                f"고객님의 월 저축 가능액은 {customer_monthly_amount:,}원이지만, "
+                f"이 상품의 월 납입한도가 {product_max_amount:,}원이므로 "
+                f"월 {product_max_amount:,}원 기준으로 계산했습니다."
+            ),
+        )
+
+    return customer_monthly_amount, "customer_db", None
+
+def _to_won_amount_or_none(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+
+    if isinstance(value, (int, float)):
+        amount = int(value)
+        return amount if amount > 0 else None
+
+    text = str(value).replace(",", "").strip()
+    if not text:
+        return None
+
+    match = re.search(r"(\d+(?:\.\d+)?)\s*만원", text)
+    if match:
+        return int(float(match.group(1)) * 10000)
+
+    match = re.search(r"(\d+(?:\.\d+)?)\s*천원", text)
+    if match:
+        return int(float(match.group(1)) * 1000)
+
+    match = re.search(r"(\d+)\s*원", text)
+    if match:
+        return int(match.group(1))
+
+    match = re.search(r"\d+", text)
+    if match:
+        return int(match.group(0))
+
+    return None
+
+
+def _is_deposit_product(product: dict[str, Any]) -> bool:
+    product_type = str(product.get("product_type") or "").strip()
+    product_name = str(product.get("product_name") or "").strip()
+
+    return product_type == "예금" or "예금" in product_name
+
+
+def _extract_product_max_amount(product: dict[str, Any]) -> int | None:
+    return (
+        _to_won_amount_or_none(product.get("max_amount"))
+        or _to_won_amount_or_none(product.get("max_monthly_amount"))
+        or _to_won_amount_or_none(product.get("max_deposit_amount"))
+    )
+
+
+def _resolve_product_monthly_amount(
+    *,
+    product: dict[str, Any],
+    requested_monthly_amount: int | None,
+    customer_monthly_amount: int | None,
+) -> tuple[int | None, str | None, str | None, str | None]:
+    """
+    추천 계산에 사용할 상품별 월 납입액을 결정합니다.
+
+    핵심:
+    - 고객 월 저축 가능액은 '총 저축 가능액'
+    - 상품 max_amount는 '해당 상품 1개에 넣을 수 있는 최대 납입액'
+    - 따라서 고객 월 저축 가능액이 상품 한도보다 크면 상품 한도만큼만 계산합니다.
+    """
+    product_max_amount = _extract_product_max_amount(product)
+
+    if requested_monthly_amount is not None:
+        if product_max_amount is not None and requested_monthly_amount > product_max_amount:
+            return (
+                product_max_amount,
+                "user_query_capped_by_product_limit",
+                "사용자 입력 월 납입액(상품 한도 적용)",
+                (
+                    f"입력하신 월 납입액은 {requested_monthly_amount:,}원이지만, "
+                    f"이 상품의 월 납입한도가 {product_max_amount:,}원이므로 "
+                    f"월 {product_max_amount:,}원 기준으로 계산했습니다."
+                ),
+            )
+
+        return (
+            requested_monthly_amount,
+            "user_query",
+            "사용자 입력 월 납입액",
+            None,
+        )
+
+    if customer_monthly_amount is None:
+        return None, None, None, None
+
+    if product_max_amount is not None and customer_monthly_amount > product_max_amount:
+        return (
+            product_max_amount,
+            "customer_db_capped_by_product_limit",
+            "고객 DB 월 저축 가능액(상품 한도 적용)",
+            (
+                f"고객님의 월 저축 가능액은 {customer_monthly_amount:,}원이지만, "
+                f"이 상품의 월 납입한도가 {product_max_amount:,}원이므로 "
+                f"월 {product_max_amount:,}원 기준으로 계산했습니다."
+            ),
+        )
+
+    return (
+        customer_monthly_amount,
+        "customer_profile.monthly_saving_amount",
+        "고객 DB 월 저축 가능액",
+        None,
+    )
+
 def _augment_recommendation_financial_results(state: AgentState, result: dict) -> dict:
     """
     추천 흐름에서 recommend_agent가 읽을 수 있는 financial_results를 만듭니다.
 
-    transaction_months는 고객 거래개월 수이므로 계약기간으로 사용하지 않습니다.
-    계약기간은 사용자 입력값 또는 상품 조건에서만 가져옵니다.
-    eligibility_agent에서 rejected/needs_check로 판단한 상품은 계산하지 않습니다.
+    핵심 원칙:
+    - transaction_months는 고객 거래개월 수이므로 계약기간으로 사용하지 않습니다.
+    - 계약기간은 사용자 입력값 또는 상품 DB 조건에서만 가져옵니다.
+    - eligibility_agent에서 rejected/needs_check로 판단한 상품은 계산하지 않습니다.
+    - 고객 DB의 월 저축 가능액은 '총 저축 가능액'이므로,
+      상품별 계산에서는 상품 max_amount를 넘지 않도록 cap을 적용합니다.
+    - 예금 상품은 월 납입액이 아니라 예치금 기준이므로,
+      예치 가능 금액이 없으면 계산을 보류합니다.
     """
     product_candidates = _load_product_candidates_for_financial(state)
     if not product_candidates:
         return result
 
-    user_query = str(state.get("user_query") or _last_user_text(state.get("messages") or ""))
-    monthly_amount = _extract_monthly_amount_from_query(user_query)
+    user_query = _safe_user_query(state)
+
+    requested_monthly_amount = _extract_monthly_amount_from_query(user_query)
     requested_term_months = _extract_term_months_from_query(user_query)
 
-    if monthly_amount is None:
-        monthly_amount = _extract_monthly_amount_from_customer_profile(state)
+    customer_monthly_amount = None
+    if requested_monthly_amount is None:
+        customer_monthly_amount = _extract_monthly_amount_from_customer_profile(state)
 
     eligibility_by_name = _load_eligibility_status_by_product(state)
     financial_results: list[dict[str, Any]] = []
@@ -729,11 +935,20 @@ def _augment_recommendation_financial_results(state: AgentState, result: dict) -
         if not isinstance(product, dict):
             continue
 
+        product = _enrich_product_with_db_fields(product)
         product_name = str(product.get("product_name") or "").strip()
         if not product_name:
             continue
 
         evidence = product.get("evidence") or []
+
+        monthly_amount, monthly_amount_source, monthly_amount_source_label, amount_cap_note = (
+            _resolve_product_monthly_amount(
+                product=product,
+                requested_monthly_amount=requested_monthly_amount,
+                customer_monthly_amount=customer_monthly_amount,
+            )
+        )
 
         eligibility_item = eligibility_by_name.get(product_name)
         if isinstance(eligibility_item, dict):
@@ -746,7 +961,12 @@ def _augment_recommendation_financial_results(state: AgentState, result: dict) -
                         "product_name": product_name,
                         "status": "needs_check",
                         "monthly_amount": monthly_amount,
+                        "monthly_amount_source": monthly_amount_source,
+                        "monthly_amount_source_label": monthly_amount_source_label,
+                        "amount_cap_note": amount_cap_note,
                         "term_months": requested_term_months,
+                        "term_months_source": "user_query" if requested_term_months is not None else None,
+                        "term_months_source_label": "사용자 입력 가입기간" if requested_term_months is not None else None,
                         "applied_rate": None,
                         "estimated_interest": None,
                         "maturity_amount": None,
@@ -757,25 +977,63 @@ def _augment_recommendation_financial_results(state: AgentState, result: dict) -
                 )
                 continue
 
-        term_months = (
-            requested_term_months
-            or _to_int_or_none(product.get("max_period_months"))
-            or _to_int_or_none(product.get("min_period_months"))
+        if _is_deposit_product(product):
+            financial_results.append(
+                {
+                    "product_name": product_name,
+                    "status": "needs_check",
+                    "monthly_amount": None,
+                    "monthly_amount_source": None,
+                    "monthly_amount_source_label": None,
+                    "amount_cap_note": None,
+                    "term_months": requested_term_months,
+                    "term_months_source": "user_query" if requested_term_months is not None else None,
+                    "term_months_source_label": "사용자 입력 가입기간" if requested_term_months is not None else None,
+                    "applied_rate": None,
+                    "estimated_interest": None,
+                    "maturity_amount": None,
+                    "reason": "예금 상품은 월 납입액이 아니라 한 번에 예치할 금액이 필요해 계산을 보류했습니다.",
+                    "calculation_assumption": "예금 상품 계산에는 예치 가능 금액이 필요합니다.",
+                    "evidence": evidence,
+                    "source_agent": "financial_agent",
+                }
+            )
+            continue
+
+        term_months, term_months_source, term_months_source_label = _resolve_recommendation_term_months(
+            product=product,
+            requested_term_months=requested_term_months,
         )
 
         applied_rate = _select_rate_for_term(product, term_months)
 
         if monthly_amount is None or term_months is None or applied_rate is None:
+            reason_parts = []
+
+            if monthly_amount is None:
+                reason_parts.append("월 납입액을 확인할 수 없습니다.")
+            if term_months is None:
+                reason_parts.append("계약기간을 확인할 수 없습니다.")
+            if applied_rate is None:
+                reason_parts.append("적용금리를 확인할 수 없습니다.")
+            if amount_cap_note:
+                reason_parts.append(amount_cap_note)
+
             financial_results.append(
                 {
                     "product_name": product_name,
                     "status": "needs_check",
                     "monthly_amount": monthly_amount,
+                    "monthly_amount_source": monthly_amount_source,
+                    "monthly_amount_source_label": monthly_amount_source_label,
+                    "amount_cap_note": amount_cap_note,
                     "term_months": term_months,
+                    "term_months_source": term_months_source,
+                    "term_months_source_label": term_months_source_label,
                     "applied_rate": applied_rate,
                     "estimated_interest": None,
                     "maturity_amount": None,
-                    "reason": "월 납입액, 계약기간 또는 적용금리 정보가 부족해 계산을 확정하지 못했습니다.",
+                    "reason": " ".join(reason_parts) or "월 납입액, 계약기간 또는 적용금리 정보가 부족해 계산을 확정하지 못했습니다.",
                     "evidence": evidence,
                     "source_agent": "financial_agent",
                 }
@@ -788,18 +1046,48 @@ def _augment_recommendation_financial_results(state: AgentState, result: dict) -
             annual_rate=applied_rate,
         )
 
+        calculation_assumption = _build_calculation_assumption(
+            monthly_amount=monthly_amount,
+            monthly_amount_source_label=monthly_amount_source_label,
+            term_months=term_months,
+            term_months_source_label=term_months_source_label,
+        )
+
+        if amount_cap_note:
+            calculation_assumption = f"{calculation_assumption} {amount_cap_note}"
+
+        reason = _build_calculated_reason(
+            monthly_amount=monthly_amount,
+            term_months=term_months,
+            after_tax_interest=calculation["after_tax_interest"],
+            maturity_amount=calculation["maturity_amount"],
+            monthly_amount_source_label=monthly_amount_source_label,
+            term_months_source_label=term_months_source_label,
+        )
+
+        if amount_cap_note:
+            reason = f"{reason} {amount_cap_note}"
+
         financial_results.append(
             {
                 "product_name": product_name,
                 "status": "calculated",
                 "monthly_amount": monthly_amount,
+                "monthly_amount_source": monthly_amount_source,
+                "monthly_amount_source_label": monthly_amount_source_label,
+                "amount_cap_note": amount_cap_note,
                 "term_months": term_months,
+                "term_months_source": term_months_source,
+                "term_months_source_label": term_months_source_label,
                 "applied_rate": applied_rate,
                 "estimated_interest": calculation["after_tax_interest"],
                 "maturity_amount": calculation["maturity_amount"],
                 "total_principal": calculation["total_principal"],
                 "before_tax_interest": calculation["before_tax_interest"],
                 "tax": calculation["tax"],
+                "calculation_assumption": calculation_assumption,
+                "payment_plan_text": _build_payment_plan_text(monthly_amount, term_months),
+                "reason": reason,
                 "evidence": evidence,
                 "source_agent": "financial_agent",
             }
@@ -885,18 +1173,267 @@ def _extract_monthly_amount_from_query(user_query: str) -> int | None:
     return None
 
 
+INTERNAL_PERIOD_CONTEXT_MARKERS = [
+    "transaction_months",
+    "bank_transaction_months",
+    "contract_months",
+    "remaining_months",
+    "transaction months",
+    "contract months",
+    "remaining months",
+    "거래개월",
+    "거래 개월",
+    "고객 거래",
+    "거래기간",
+    "가입계좌",
+    "가입 계좌",
+    "기존계좌",
+    "기존 계좌",
+    "남은기간",
+    "남은 기간",
+    "만기까지",
+]
+
+
+def _safe_user_query(state: AgentState) -> str:
+    """
+    계산 조건은 실제 사용자 발화에서만 가져옵니다.
+
+    state["user_query"]에 customer_profile, agent_outputs 같은 내부 컨텍스트가
+    섞이는 경우가 있어 messages의 마지막 human/user 메시지를 우선 사용합니다.
+    그래도 없으면 state["user_query"]를 쓰되 내부 컨텍스트 라인은 제거합니다.
+    """
+    message_query = _last_user_text(state.get("messages") or [])
+    if message_query:
+        return _strip_internal_context_lines(message_query)
+
+    return _strip_internal_context_lines(str(state.get("user_query") or ""))
+
+
+def _strip_internal_context_lines(text: str) -> str:
+    lines = str(text or "").splitlines()
+    kept: list[str] = []
+
+    for line in lines:
+        normalized = line.lower()
+        if any(marker.lower() in normalized for marker in INTERNAL_PERIOD_CONTEXT_MARKERS):
+            continue
+        if any(marker in line for marker in ["customer_profile", "agent_outputs", "financial_result", "eligibility_result"]):
+            continue
+        kept.append(line)
+
+    return "\n".join(kept).strip()
+
+
+def _is_internal_period_context(text: str, start: int, end: int) -> bool:
+    window = str(text or "")[max(0, start - 50): min(len(str(text or "")), end + 50)]
+    lowered = window.lower()
+    return any(marker.lower() in lowered for marker in INTERNAL_PERIOD_CONTEXT_MARKERS)
+
+
 def _extract_term_months_from_query(user_query: str) -> int | None:
-    normalized = str(user_query or "").replace(",", "").replace(" ", "")
+    """
+    사용자가 직접 말한 가입기간만 추출합니다.
+    내부 필드의 transaction_months/contract_months/remaining_months는 제외합니다.
+    """
+    text = _strip_internal_context_lines(str(user_query or "").replace(",", ""))
 
-    year_match = re.search(r"([0-9]{1,2})년", normalized)
-    if year_match:
-        return int(year_match.group(1)) * 12
+    for year_match in re.finditer(r"([0-9]{1,2})\s*년", text):
+        if not _is_internal_period_context(text, year_match.start(), year_match.end()):
+            return int(year_match.group(1)) * 12
 
-    month_match = re.search(r"([0-9]{1,2})개월", normalized)
-    if month_match:
-        return int(month_match.group(1))
+    for month_match in re.finditer(r"([0-9]{1,2})\s*개월", text):
+        if not _is_internal_period_context(text, month_match.start(), month_match.end()):
+            return int(month_match.group(1))
 
     return None
+
+# helper 
+_PRODUCT_DETAIL_MAP_CACHE: dict[str, dict[str, Any]] | None = None
+
+
+def _normalize_product_lookup_name(name: Any) -> str:
+    return re.sub(r"\s+", "", str(name or "")).lower()
+
+
+def _get_product_detail_map_cached() -> dict[str, dict[str, Any]]:
+    global _PRODUCT_DETAIL_MAP_CACHE
+
+    if _PRODUCT_DETAIL_MAP_CACHE is not None:
+        return _PRODUCT_DETAIL_MAP_CACHE
+
+    if get_product_detail_map is None:
+        _PRODUCT_DETAIL_MAP_CACHE = {}
+        return _PRODUCT_DETAIL_MAP_CACHE
+
+    try:
+        raw_map = get_product_detail_map()
+    except Exception:
+        _PRODUCT_DETAIL_MAP_CACHE = {}
+        return _PRODUCT_DETAIL_MAP_CACHE
+
+    if not isinstance(raw_map, dict):
+        _PRODUCT_DETAIL_MAP_CACHE = {}
+        return _PRODUCT_DETAIL_MAP_CACHE
+
+    normalized_map: dict[str, dict[str, Any]] = {}
+
+    for key, value in raw_map.items():
+        if isinstance(value, dict):
+            product_name = value.get("product_name") or key
+            normalized_map[_normalize_product_lookup_name(product_name)] = value
+            normalized_map[_normalize_product_lookup_name(key)] = value
+
+    _PRODUCT_DETAIL_MAP_CACHE = normalized_map
+    return _PRODUCT_DETAIL_MAP_CACHE
+
+
+def _enrich_product_with_db_fields(product: dict[str, Any]) -> dict[str, Any]:
+    """
+    financial 계산에 필요한 기간/금리/금액 정보를 DB products 기준으로 보강합니다.
+    """
+    enriched = dict(product or {})
+    product_name = enriched.get("product_name")
+
+    detail_map = _get_product_detail_map_cached()
+    db_detail = detail_map.get(_normalize_product_lookup_name(product_name))
+
+    if not isinstance(db_detail, dict):
+        return enriched
+
+    db_first_keys = [
+        "product_id",
+        "product_name",
+        "product_type",
+        "min_amount",
+        "max_amount",
+        "min_period_months",
+        "max_period_months",
+        "base_rate",
+        "max_rate",
+        "age_min",
+        "age_max",
+        "join_channel",
+        "rag_document_key",
+        "is_active",
+    ]
+
+    for key in db_first_keys:
+        value = db_detail.get(key)
+        if value not in (None, ""):
+            enriched[key] = value
+
+    return enriched
+
+def _resolve_recommendation_term_months(
+    *,
+    product: dict[str, Any],
+    requested_term_months: int | None,
+) -> tuple[int | None, str | None, str | None]:
+    """
+    추천 계산 기간을 결정합니다.
+
+    - 사용자가 기간을 말했으면 그 기간을 사용합니다.
+    - 사용자가 기간을 말하지 않았으면 상품의 가입 가능 기간을 기준으로 계산하되,
+      반드시 '가정'임을 source/label에 남깁니다.
+    - 고객 거래기간(transaction_months)은 사용하지 않습니다.
+    """
+    if requested_term_months is not None:
+        return requested_term_months, "user_query", "사용자 입력 가입기간"
+
+    # 강사님 수정으로 product_agent가 products 테이블의 정형 기간을 넣어주므로,
+    # RAG raw_text에서 뽑은 기간보다 DB 정형값을 우선합니다.
+    max_period = _to_int_or_none(product.get("max_period_months"))
+    if max_period is not None:
+        return max_period, "product_max_period_assumption", "사용자 기간 미지정: 상품 최대 가입기간 가정"
+
+    min_period = _to_int_or_none(product.get("min_period_months"))
+    if min_period is not None:
+        return min_period, "product_min_period_assumption", "사용자 기간 미지정: 상품 최소 가입기간 가정"
+
+    term_options = _extract_term_options_from_product(product)
+    if term_options:
+        # 여러 기간이 있으면 비교 가능성을 위해 가장 긴 가입 가능 기간을 대표 계산기간으로 사용한다.
+        selected = max(term_options)
+        return selected, "product_term_option_assumption", "사용자 기간 미지정: 상품 가입 가능 기간 중 최대기간 가정"
+
+    return None, None, None
+
+
+def _extract_term_options_from_product(product: dict[str, Any]) -> list[int]:
+    raw_options = product.get("term_options_months") or product.get("term_options") or []
+    options: list[int] = []
+
+    if isinstance(raw_options, list):
+        for value in raw_options:
+            parsed = _to_int_or_none(value)
+            if parsed is not None:
+                options.append(parsed)
+
+    raw_text = str(product.get("raw_text") or "")
+    for value in re.findall(r"([0-9]{1,2})\s*개월", raw_text):
+        parsed = _to_int_or_none(value)
+        if parsed is not None:
+            options.append(parsed)
+
+    min_period = _to_int_or_none(product.get("min_period_months"))
+    max_period = _to_int_or_none(product.get("max_period_months"))
+    if min_period is not None:
+        options.append(min_period)
+    if max_period is not None:
+        options.append(max_period)
+
+    # 1~120개월 범위만 계약기간 후보로 인정해 페이지 번호/금리 숫자 오염을 줄입니다.
+    return sorted({value for value in options if 1 <= value <= 120})
+
+
+def _build_payment_plan_text(monthly_amount: int | None, term_months: int | None) -> str:
+    if monthly_amount is None or term_months is None:
+        return "납입 계획을 확정하려면 월 납입액과 가입기간이 필요합니다."
+    return f"{term_months}개월 동안 월 {_format_won(monthly_amount)}씩 납입"
+
+
+def _build_calculation_assumption(
+    *,
+    monthly_amount: int | None,
+    monthly_amount_source_label: str | None,
+    term_months: int | None,
+    term_months_source_label: str | None,
+) -> str:
+    amount_part = (
+        f"{monthly_amount_source_label} {_format_won(monthly_amount)}"
+        if monthly_amount is not None and monthly_amount_source_label
+        else "월 납입액 미확정"
+    )
+    term_part = (
+        f"{term_months_source_label} {term_months}개월"
+        if term_months is not None and term_months_source_label
+        else "가입기간 미확정"
+    )
+    return f"{amount_part}, {term_part} 기준으로 계산했습니다."
+
+
+def _build_calculated_reason(
+    *,
+    monthly_amount: int,
+    term_months: int,
+    after_tax_interest: int,
+    maturity_amount: int,
+    monthly_amount_source_label: str | None,
+    term_months_source_label: str | None,
+) -> str:
+    source_note = _build_calculation_assumption(
+        monthly_amount=monthly_amount,
+        monthly_amount_source_label=monthly_amount_source_label,
+        term_months=term_months,
+        term_months_source_label=term_months_source_label,
+    )
+    return (
+        f"{term_months}개월 동안 월 {_format_won(monthly_amount)}씩 납입하면 "
+        f"예상 세후 이자는 {_format_won(after_tax_interest)}, "
+        f"만기 예상액은 {_format_won(maturity_amount)}입니다. "
+        f"{source_note}"
+    )
 
 
 def _extract_monthly_amount_from_customer_profile(state: AgentState) -> int | None:
@@ -948,26 +1485,31 @@ def _calculate_savings_projection(
 def _build_recommendation_financial_summary(financial_results: list[dict[str, Any]]) -> str:
     lines = [
         "추천 후보 상품별 예상 만기금액 계산 결과입니다.",
+        "사용자가 월 납입액 또는 가입기간을 직접 말하지 않은 경우에는 고객 DB의 월 저축 가능액과 상품 가입 가능 기간을 기준으로 계산 가정을 표시합니다.",
         "",
-        "| 상품명 | 상태 | 월 납입액 | 기간 | 적용금리 | 예상 세후 이자 | 만기 예상액 |",
-        "|---|---|---:|---:|---:|---:|---:|",
+        "| 상품명 | 상태 | 월 납입액 | 납입액 기준 | 기간 | 기간 기준 | 적용금리 | 예상 세후 이자 | 만기 예상액 |",
+        "|---|---|---:|---|---:|---|---:|---:|---:|",
     ]
 
     for item in financial_results:
         product_name = item.get("product_name", "-")
         status = item.get("status", "-")
         monthly_amount = item.get("monthly_amount")
+        monthly_source = item.get("monthly_amount_source_label") or "-"
         term_months = item.get("term_months")
+        term_source = item.get("term_months_source_label") or "-"
         applied_rate = item.get("applied_rate")
         estimated_interest = item.get("estimated_interest")
         maturity_amount = item.get("maturity_amount")
 
         lines.append(
-            "| {product_name} | {status} | {monthly} | {term} | {rate} | {interest} | {maturity} |".format(
+            "| {product_name} | {status} | {monthly} | {monthly_source} | {term} | {term_source} | {rate} | {interest} | {maturity} |".format(
                 product_name=product_name,
                 status=status,
                 monthly=f"{int(monthly_amount):,}원" if monthly_amount is not None else "-",
+                monthly_source=monthly_source,
                 term=f"{int(term_months)}개월" if term_months is not None else "-",
+                term_source=term_source,
                 rate=f"{float(applied_rate):.2f}%" if applied_rate is not None else "-",
                 interest=f"{int(estimated_interest):,}원" if estimated_interest is not None else "-",
                 maturity=f"{int(maturity_amount):,}원" if maturity_amount is not None else "-",

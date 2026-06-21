@@ -131,10 +131,13 @@ def get_customer_profile(customer_name: str) -> str:
         customer_name: 고객 이름 (예: "고객_001")
     """
     question = (
-        f"{customer_name}의 기본 정보 조회: "
-        f"이름, 생년월일, 직업, 연소득(만원), 소득수준, "
-        f"주거래은행 여부, 급여이체 여부, 자동이체 여부, "
-        f"카드사용 여부, 마케팅동의 여부, 거래개월수, 월가용저축액"
+        f"{customer_name}의 고객 기본 정보를 customers 테이블에서 조회하세요. "
+        f"반드시 다음 DB 컬럼명을 그대로 SELECT 하세요: "
+        f"customer_id, customer_name, birth_date, customer_job, annual_income, income_level, "
+        f"main_bank_yn, salary_transfer_yn, auto_transfer_yn, card_usage_yn, "
+        f"marketing_agree_yn, transaction_months, available_monthly_saving. "
+        f"컬럼 alias는 사용하지 말고, 고객 조건은 customer_name = '{customer_name}' 으로 제한하세요. "
+        f"결과는 1명만 조회하세요."
     )
     return _nl2sql_query(question)
 

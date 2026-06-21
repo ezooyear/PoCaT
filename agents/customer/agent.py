@@ -209,10 +209,20 @@ def customer_agent_node(state: AgentState) -> dict:
         max_iterations=3,
     )
 
-
 def _extract_customer_profile(tool_results: list[dict[str, Any]]) -> dict[str, Any]:
     for item in tool_results:
         if item.get("tool_name") != "get_customer_profile":
             continue
-        return parse_customer_profile(item.get("tool_result"))
+
+        profile = parse_customer_profile(item.get("tool_result"))
+
+        # transaction_months는 고객의 은행 거래 개월 수이며,
+        # 사용자의 희망 계약 기간이 아니므로 명확한 키로 변경한다.
+        transaction_months = profile.pop("transaction_months", None)
+
+        if transaction_months is not None:
+            profile["bank_transaction_months"] = transaction_months
+
+        return profile
+
     return {}
