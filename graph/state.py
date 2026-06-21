@@ -70,6 +70,23 @@ class AgentState(TypedDict, total=False):
     # 6. Validation 관련 결과
     validation_result: Optional[dict[str, Any]]
 
+    ## 6-1. Validation 재생성 루프 관리
+    validation_passed: Optional[bool]
+    revision_required: Optional[bool]
+    failure_type: Optional[str]
+    missing_fields: Optional[list[str]]
+    blocking_issues: Optional[list[str]]
+    awaiting_user_input: Optional[bool]
+
+    # retry loop: validation 실패 후 필요한 agent부터 최대 N회 재실행
+    validation_retry_count: Optional[int]
+    max_validation_retries: Optional[int]
+    validation_retry_query: Optional[str]
+    retry_start_agent: Optional[str]
+    retry_reason: Optional[str]
+    retry_history: Optional[list[dict[str, Any]]]
+    last_validation_failed: Optional[bool]
+
     # Validation 전 임시 답변
     draft_answer: Optional[str]
 

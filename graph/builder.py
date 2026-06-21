@@ -26,6 +26,14 @@ AGENT_NODES = {
     "validation_agent",
 }
 
+# retry loop: validation 이후 다시 시작할 수 있는 agent 목록
+RETRYABLE_START_AGENTS = {
+    "product_agent",
+    "eligibility_agent",
+    "financial_agent",
+    "recommend_agent",
+}
+
 
 def _supervisor_router(state: AgentState) -> str:
     """
@@ -43,15 +51,29 @@ def _supervisor_router(state: AgentState) -> str:
 
     return END
 
-
 def _route_after(current_node: str):
-    """
-    현재 실행된 agent를 기준으로 plan에서 다음 agent를 찾는다.
-    마지막 agent까지 끝났으면 최종 취합을 위해 supervisor로 돌아간다.
-    """
+    """현재 실행된 agent를 기준으로 다음 node를 결정한다.
 
+    retry loop:
+    - validation_agent가 실패했고 retry_start_agent가 있으면 해당 agent부터 재실행
+    - retry_start_agent가 없으면 기존처럼 supervisor로 반환
+    """
     def router(state: AgentState) -> str:
         plan = state.get("plan") or []
+
+        # retry loop: validation 실패 후 필요한 agent부터 재실행
+        if current_node == "validation_agent":
+            retry_start_agent = state.get("retry_start_agent")
+            awaiting_user_input = bool(state.get("awaiting_user_input"))
+
+            if (
+                retry_start_agent in RETRYABLE_START_AGENTS
+                and not awaiting_user_input
+                and (not plan or retry_start_agent in plan)
+            ):
+                return retry_start_agent
+
+            return "supervisor"
 
         if not plan:
             return "supervisor"
@@ -62,7 +84,6 @@ def _route_after(current_node: str):
 
             if next_index < len(plan):
                 next_agent = plan[next_index]
-
                 if next_agent in AGENT_NODES:
                     return next_agent
 
@@ -70,7 +91,6 @@ def _route_after(current_node: str):
         return "supervisor"
 
     return router
-
 
 def build_graph():
     builder = StateGraph(AgentState)

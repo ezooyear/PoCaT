@@ -42,6 +42,363 @@ LLM_VALIDATION_TASKS = {
     "switch_analysis",
 }
 
+# retry loop: validation 실패 시 어느 agent부터 다시 실행할지 판단하는 설정
+DEFAULT_MAX_VALIDATION_RETRIES = 1
+
+RETRYABLE_START_AGENTS = {
+    "product_agent",
+    "eligibility_agent",
+    "financial_agent",
+    "recommend_agent",
+}
+
+STALE_FIELDS_BY_RETRY_START = {
+    "product_agent": [
+        "product_result",
+        "products",
+        "product_candidates",
+        "searched_products",
+        "eligibility_result",
+        "eligibility_results",
+        "financial_result",
+        "financial_results",
+        "recommend_result",
+        "recommendation_results",
+        "draft_answer",
+        "final_answer",
+    ],
+    "eligibility_agent": [
+        "eligibility_result",
+        "eligibility_results",
+        "financial_result",
+        "financial_results",
+        "recommend_result",
+        "recommendation_results",
+        "draft_answer",
+        "final_answer",
+    ],
+    "financial_agent": [
+        "financial_result",
+        "financial_results",
+        "recommend_result",
+        "recommendation_results",
+        "draft_answer",
+        "final_answer",
+    ],
+    "recommend_agent": [
+        "recommend_result",
+        "recommendation_results",
+        "draft_answer",
+        "final_answer",
+    ],
+}
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_validation_retry_count_for_query(state: AgentState) -> int:
+    """현재 user_query 기준 retry 횟수를 가져옵니다.
+
+    이전 질문의 retry_count가 다음 질문에 영향을 주지 않도록
+    validation_retry_query와 현재 user_query가 다르면 0부터 시작합니다.
+    """
+    current_query = str(state.get("user_query") or "")
+    previous_query = str(state.get("validation_retry_query") or "")
+
+    if current_query and current_query != previous_query:
+        return 0
+
+    return max(0, _safe_int(state.get("validation_retry_count"), 0))
+
+
+def _collect_validation_issue_text(
+    verify_result: dict[str, Any],
+    validation_summary: dict[str, Any],
+) -> str:
+    """LLM/rule 검증 이슈를 문자열로 모아 retry agent 판단에 사용합니다."""
+    parts: list[str] = []
+
+    for issue in verify_result.get("issues") or []:
+        if isinstance(issue, dict):
+            for key in ["type", "message", "suggestion", "related_agent"]:
+                value = issue.get(key)
+                if value:
+                    parts.append(str(value))
+        else:
+            parts.append(str(issue))
+
+    for issue in validation_summary.get("blocking_issues") or []:
+        parts.append(str(issue))
+
+    summary = verify_result.get("summary")
+    if summary:
+        parts.append(str(summary))
+
+    return " ".join(parts).lower()
+
+
+def _collect_validation_issue_types(verify_result: dict[str, Any]) -> set[str]:
+    issue_types: set[str] = set()
+
+    for issue in verify_result.get("issues") or []:
+        if isinstance(issue, dict) and issue.get("type"):
+            issue_types.add(str(issue.get("type")))
+
+    return issue_types
+
+
+def _collect_related_agents(verify_result: dict[str, Any]) -> set[str]:
+    related_agents: set[str] = set()
+
+    for issue in verify_result.get("issues") or []:
+        if isinstance(issue, dict) and issue.get("related_agent"):
+            related_agents.add(str(issue.get("related_agent")))
+
+    return related_agents
+
+
+def _infer_retry_start_agent(
+    verify_result: dict[str, Any],
+    validation_summary: dict[str, Any],
+    state: AgentState,
+) -> str | None:
+    """검증 실패 원인에 따라 어느 agent부터 다시 실행할지 결정합니다.
+
+    upstream 문제일수록 앞단 agent부터 다시 실행합니다.
+    product → eligibility → financial → recommend 순서로 판단합니다.
+    """
+    issue_text = _collect_validation_issue_text(verify_result, validation_summary)
+    issue_types = _collect_validation_issue_types(verify_result)
+    related_agents = _collect_related_agents(verify_result)
+
+    # 추천 질문인데 상품 후보 자체가 비어 있으면 product부터 다시 검색
+    if state.get("task_type") == "recommendation" and not state.get("product_candidates"):
+        return "product_agent"
+
+    # 상품 후보/RAG 근거/상품 조건 문제
+    product_keywords = [
+        "product",
+        "product_candidates",
+        "rag",
+        "근거",
+        "상품 후보",
+        "상품후보",
+        "상품 조건",
+        "상품조건",
+        "상품 정보",
+        "상품정보",
+        "상품명",
+    ]
+    if (
+        "product_agent" in related_agents
+        or "rag_evidence_missing" in issue_types
+        or any(keyword in issue_text for keyword in product_keywords)
+    ):
+        return "product_agent"
+
+    # 가입 가능 여부/대상자/군인 상품 오추천 문제
+    eligibility_keywords = [
+        "eligibility",
+        "가입 가능",
+        "가입가능",
+        "가입 대상",
+        "가입대상",
+        "가입 조건",
+        "가입조건",
+        "부적절",
+        "군인",
+        "직업군인",
+        "장병",
+        "간부",
+        "대상자가",
+        "inappropriate",
+    ]
+    if (
+        "eligibility_agent" in related_agents
+        or "inappropriate_recommendation" in issue_types
+        or any(keyword in issue_text for keyword in eligibility_keywords)
+    ):
+        return "eligibility_agent"
+
+    # 금리/이자/만기/납입/계산 문제
+    financial_keywords = [
+        "financial",
+        "calculation",
+        "계산",
+        "금리",
+        "이자",
+        "만기",
+        "납입",
+        "금액",
+        "세전",
+        "세후",
+        "기간",
+        "개월",
+    ]
+    financial_issue_types = {
+        "calculation_mismatch",
+        "amount_mismatch",
+        "rate_mismatch",
+        "unverifiable",
+    }
+    if (
+        "financial_agent" in related_agents
+        or issue_types.intersection(financial_issue_types)
+        or any(keyword in issue_text for keyword in financial_keywords)
+    ):
+        return "financial_agent"
+
+    # 추천 결과 누락/추천 요약 문제
+    recommend_keywords = [
+        "recommend",
+        "recommendation",
+        "추천",
+        "추천 결과",
+        "추천결과",
+        "추천 없음",
+        "추천없음",
+    ]
+    if (
+        "recommend_agent" in related_agents
+        or "recommendation_consistency" in issue_types
+        or any(keyword in issue_text for keyword in recommend_keywords)
+    ):
+        return "recommend_agent"
+
+    # 구체 원인 분류가 애매하지만 agent 출력 문제면 recommend부터 최소 재생성
+    if validation_summary.get("failure_type") == "agent_output_error":
+        return "recommend_agent"
+
+    return None
+
+
+def _build_retry_reason(
+    verify_result: dict[str, Any],
+    validation_summary: dict[str, Any],
+) -> str:
+    blocking_issues = validation_summary.get("blocking_issues") or []
+
+    if blocking_issues:
+        return str(blocking_issues[0])[:300]
+
+    summary = str(verify_result.get("summary") or "").strip()
+    if summary:
+        return summary[:300]
+
+    return "Validation 실패로 추천 결과 재생성이 필요합니다."
+
+
+def _clear_stale_outputs_for_retry(retry_start_agent: str | None) -> dict[str, Any]:
+    """재실행 시작 지점 이후의 이전 결과를 비워 stale result 사용을 방지합니다."""
+    if not retry_start_agent:
+        return {}
+
+    stale_fields = STALE_FIELDS_BY_RETRY_START.get(retry_start_agent, [])
+    return {field: None for field in stale_fields}
+
+
+def _build_validation_retry_update(
+    state: AgentState,
+    verify_result: dict[str, Any],
+    validation_summary: dict[str, Any],
+) -> dict[str, Any]:
+    """Validation 결과를 보고 retry loop 관련 state update를 생성합니다.
+
+    원칙:
+    - validation 통과: retry_start_agent 제거
+    - 사용자 정보 부족: 재실행하지 않고 supervisor가 추가 질문
+    - agent 출력 문제: 최대 1회 필요한 agent부터 재실행
+    """
+    current_query = str(state.get("user_query") or "")
+    max_retries = max(
+        0,
+        _safe_int(
+            state.get("max_validation_retries"),
+            DEFAULT_MAX_VALIDATION_RETRIES,
+        ),
+    )
+    retry_count = _get_validation_retry_count_for_query(state)
+    retry_history = list(state.get("retry_history") or [])
+
+    base_update: dict[str, Any] = {
+        "max_validation_retries": max_retries,
+        "validation_retry_query": current_query,
+    }
+
+    is_valid = bool(verify_result.get("is_valid"))
+
+    if is_valid:
+        return {
+            **base_update,
+            "validation_retry_count": 0,
+            "retry_start_agent": None,
+            "retry_reason": None,
+            "last_validation_failed": False,
+            "retry_history": retry_history,
+        }
+
+    if validation_summary.get("awaiting_user_input"):
+        return {
+            **base_update,
+            "validation_retry_count": retry_count,
+            "retry_start_agent": None,
+            "retry_reason": "사용자 추가 정보가 필요하여 자동 재생성을 수행하지 않습니다.",
+            "last_validation_failed": True,
+            "retry_history": retry_history,
+        }
+
+    if retry_count >= max_retries:
+        return {
+            **base_update,
+            "validation_retry_count": retry_count,
+            "retry_start_agent": None,
+            "retry_reason": "Validation retry 최대 횟수에 도달하여 supervisor로 반환합니다.",
+            "last_validation_failed": True,
+            "retry_history": retry_history,
+        }
+
+    retry_start_agent = _infer_retry_start_agent(
+        verify_result=verify_result,
+        validation_summary=validation_summary,
+        state=state,
+    )
+
+    if retry_start_agent not in RETRYABLE_START_AGENTS:
+        return {
+            **base_update,
+            "validation_retry_count": retry_count,
+            "retry_start_agent": None,
+            "retry_reason": "재실행할 agent를 특정하지 못해 supervisor로 반환합니다.",
+            "last_validation_failed": True,
+            "retry_history": retry_history,
+        }
+
+    next_retry_count = retry_count + 1
+    retry_reason = _build_retry_reason(verify_result, validation_summary)
+
+    retry_record = {
+        "retry_count": next_retry_count,
+        "retry_start_agent": retry_start_agent,
+        "retry_reason": retry_reason,
+        "failure_type": validation_summary.get("failure_type"),
+        "blocking_issues": validation_summary.get("blocking_issues") or [],
+    }
+
+    return {
+        **base_update,
+        **_clear_stale_outputs_for_retry(retry_start_agent),
+        "validation_retry_count": next_retry_count,
+        "retry_start_agent": retry_start_agent,
+        "retry_reason": retry_reason,
+        "last_validation_failed": True,
+        "retry_history": retry_history + [retry_record],
+    }
+
 # helper함수
 def _add_validation_field_semantics(validation_context: Any) -> Any:
     """
@@ -123,6 +480,12 @@ def _validation_agent_node_impl(state: AgentState) -> dict[str, Any]:
         "failed"
     )
 
+    retry_loop_update = _build_validation_retry_update(
+        state=state,
+        verify_result=verify_result,
+        validation_summary=validation_summary,
+    )
+
     validation_result = make_agent_result(
         status=validation_status,
         result={
@@ -137,6 +500,10 @@ def _validation_agent_node_impl(state: AgentState) -> dict[str, Any]:
             "missing_fields": validation_summary["missing_fields"],
             "blocking_issues": validation_summary["blocking_issues"],
             "awaiting_user_input": validation_summary["awaiting_user_input"],
+            "retry_start_agent": retry_loop_update.get("retry_start_agent"),
+            "retry_reason": retry_loop_update.get("retry_reason"),
+            "validation_retry_count": retry_loop_update.get("validation_retry_count"),
+            "max_validation_retries": retry_loop_update.get("max_validation_retries"),
             "summary": verify_result.get("summary"),
             "final_notes": verify_result.get("final_notes", []),
         },
@@ -151,9 +518,8 @@ def _validation_agent_node_impl(state: AgentState) -> dict[str, Any]:
     if "validation_agent" not in completed_agents:
         completed_agents.append("validation_agent")
 
-    return {
+    result_update = {
         "validation_result": validation_result,
-
         # 추가: Supervisor가 깊게 파싱하지 않고 바로 볼 수 있는 필드
         "validation_passed": is_valid,
         "revision_required": validation_summary["revision_required"],
@@ -161,12 +527,16 @@ def _validation_agent_node_impl(state: AgentState) -> dict[str, Any]:
         "missing_fields": validation_summary["missing_fields"],
         "blocking_issues": validation_summary["blocking_issues"],
         "awaiting_user_input": validation_summary["awaiting_user_input"],
-
         "agent_outputs": agent_outputs,
         "current_agent": "validation_agent",
         "completed_agents": completed_agents,
         "current_step": (state.get("current_step") or 0) + 1,
     }
+
+    # retry loop: validation 실패 시 builder가 retry_start_agent를 보고 재실행
+    result_update.update(retry_loop_update)
+
+    return result_update
 def _has_recommendation_result(state: AgentState) -> bool:
     """
     추천 결과가 하나라도 있으면 True.
@@ -647,6 +1017,9 @@ def validation_agent_node(state: AgentState) -> dict[str, Any]:
                         "failure_type": result.get("failure_type"),
                         "missing_fields": result.get("missing_fields"),
                         "blocking_issues": result.get("blocking_issues"),
+                        "retry_start_agent": result.get("retry_start_agent"),
+                        "retry_reason": result.get("retry_reason"),
+                        "validation_retry_count": result.get("validation_retry_count"),
                     },
                 ),
                 metadata={
