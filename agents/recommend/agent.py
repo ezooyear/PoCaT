@@ -23,7 +23,7 @@ ALLOWED_ELIGIBILITY_STATUSES = {"eligible"}
 EXCLUDED_ELIGIBILITY_STATUSES = {"needs_check", "rejected", "invalid_product"}
 
 
-def recommend_agent_node(state: AgentState) -> dict:
+async def recommend_agent_node(state: AgentState) -> dict:
     with langfuse_observation(
         name="recommend_agent",
         as_type="span",

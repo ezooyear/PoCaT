@@ -424,7 +424,7 @@ def _add_validation_field_semantics(validation_context: Any) -> Any:
 
     return validation_context
 
-def _validation_agent_node_impl(state: AgentState) -> dict[str, Any]:
+async def _validation_agent_node_impl(state: AgentState) -> dict[str, Any]:
     """
     Validation Agent 실제 실행 로직
 
@@ -446,7 +446,7 @@ def _validation_agent_node_impl(state: AgentState) -> dict[str, Any]:
 
     # 2차 검증: 복잡한 task_type에서만 LLM 실행
     if should_run_llm:
-        verify_result = _run_llm_verify_result(
+        verify_result = await _run_llm_verify_result_async(
             validation_context=validation_context,
             rule_issues=rule_issues,
             rule_checked_items=rule_checked_items,
@@ -797,7 +797,7 @@ def _should_run_llm_validation(state: AgentState) -> bool:
     return task_type in LLM_VALIDATION_TASKS
 
 
-def _run_llm_verify_result(
+async def _run_llm_verify_result_async(
     validation_context: dict[str, Any],
     rule_issues: list[str],
     rule_checked_items: dict[str, bool],
@@ -829,7 +829,7 @@ def _run_llm_verify_result(
     ]
 
     try:
-        response = llm.invoke(messages)
+        response = await llm.ainvoke(messages)
         return _parse_json_response(response.content)
 
     except Exception:
@@ -990,7 +990,7 @@ def _normalize_verify_result(data: dict[str, Any]) -> dict[str, Any]:
 
 
 
-def validation_agent_node(state: AgentState) -> dict[str, Any]:
+async def validation_agent_node(state: AgentState) -> dict[str, Any]:
     try:
         with langfuse_observation(
             name="validation_agent",
@@ -1002,7 +1002,7 @@ def validation_agent_node(state: AgentState) -> dict[str, Any]:
             ),
             metadata={"agent": "validation_agent"},
         ) as observation:
-            result = _validation_agent_node_impl(state)
+            result = await _validation_agent_node_impl(state)
             validation_result = result.get("validation_result", {})
             update_observation(
                 observation,

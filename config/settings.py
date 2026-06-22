@@ -38,7 +38,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b:free")
 
 
-def get_llm(model: str = None, temperature: float = 0):
+def get_llm(model: str = None, temperature: float = 0, streaming: bool = False):
     """Create an OpenRouter chat model instance."""
 
     clear_blocking_proxy()
@@ -54,4 +54,5 @@ def get_llm(model: str = None, temperature: float = 0):
         model=model or LLM_MODEL,
         temperature=temperature,
         api_key=OPENROUTER_API_KEY,
+        streaming=streaming,
     )

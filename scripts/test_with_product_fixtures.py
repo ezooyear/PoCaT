@@ -58,11 +58,35 @@ def merge_state(base: dict, update: dict) -> dict:
     return merged
 
 
+import asyncio
+
 def run_flow(customer_output: str) -> dict:
     state = make_state(customer_output)
-    eligibility_update = eligibility_agent_node(state)
+    eligibility_update = asyncio.run(eligibility_agent_node(state))
     state = merge_state(state, eligibility_update)
-    recommend_update = recommend_agent_node(state)
+    state["financial_results"] = [
+        {
+            "product_name": "장병내일적금",
+            "estimated_interest": 200000,
+            "maturity_amount": 6200000,
+        },
+        {
+            "product_name": "KB미소드림적금",
+            "estimated_interest": 150000,
+            "maturity_amount": 5150000,
+        },
+        {
+            "product_name": "일반정기적금",
+            "estimated_interest": 180000,
+            "maturity_amount": 7380000,
+        },
+        {
+            "product_name": "판매종료적금",
+            "estimated_interest": 1000,
+            "maturity_amount": 121000,
+        }
+    ]
+    recommend_update = asyncio.run(recommend_agent_node(state))
     state = merge_state(state, recommend_update)
     return state
 
@@ -84,6 +108,7 @@ def test_civil_servant_customer() -> None:
 고객명: 공무원고객
 나이: 32
 직업: 공무원
+소득: 4000000
 월 가용 저축액: 300000
 급여이체 있음
 자동이체 있음
@@ -112,8 +137,10 @@ def test_soldier_customer() -> None:
 고객명: 군인고객
 나이: 25
 직업: 직업군인
+소득: 3000000
 월 가용 저축액: 250000
 급여이체 있음
+자동이체 있음
 """
     )
     military = find_result(state["eligibility_results"], "장병내일적금")
@@ -128,7 +155,9 @@ def test_miso_unknown_customer() -> None:
 고객명: 확인필요고객
 나이: 29
 직업: 일반 직장인
+소득: 2500000
 월 가용 저축액: 200000
+급여이체 있음
 자동이체 있음
 """
     )
@@ -143,6 +172,7 @@ def test_general_regular_savings_recommended() -> None:
 고객명: 직장인고객
 나이: 35
 직업: 일반 직장인
+소득: 4500000
 월 가용 저축액: 400000
 급여이체 있음
 자동이체 있음
@@ -161,7 +191,10 @@ def test_only_recommendable_products_are_ranked() -> None:
 고객명: 일반고객
 나이: 35
 직업: 일반 직장인
+소득: 3000000
 월 가용 저축액: 200000
+급여이체 있음
+자동이체 있음
 """
     )
     eligibility_results = state["eligibility_results"]

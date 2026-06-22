@@ -70,7 +70,7 @@ def _merge_user_constraints_into_customer_profile(
     return profile
 
 
-def eligibility_agent_node(state: AgentState) -> dict:
+async def eligibility_agent_node(state: AgentState) -> dict:
     with langfuse_observation(
         name="eligibility_agent",
         as_type="span",

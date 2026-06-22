@@ -7,6 +7,10 @@ from pathlib import Path
 import re
 from uuid import uuid4
 
+import asyncio
+import queue
+import threading
+import time
 from dotenv import load_dotenv
 import streamlit as st
 
@@ -1335,7 +1339,7 @@ def _sanitize_chat_markdown(content: str) -> str:
     return text.strip()
 
 
-def _run_assistant(prompt: str) -> str:
+def _run_assistant(prompt: str, assistant_slot) -> str:
     selected_customer = st.session_state.selected_customer
     explicit_customer_id = _extract_explicit_customer_id(prompt)
     target_customer = selected_customer
@@ -1368,61 +1372,219 @@ def _run_assistant(prompt: str) -> str:
         graph_messages = list(st.session_state.conversation_messages)
         graph_messages.append(("user", graph_prompt))
 
-    st.session_state.conversation_messages = graph_messages
-
     customer_profile = _build_customer_state_profile(target_customer)
     customer_accounts = target_customer.get("accounts", []) if target_customer else []
     graph_context = _build_graph_context(target_customer, customer_context)
+    langfuse_session_id = st.session_state.langfuse_session_id
+    graph = st.session_state.graph
 
-    with langfuse_trace_context(
-        trace_name="streamlit-chat-turn",
-        session_id=st.session_state.langfuse_session_id,
-        tags=["streamlit", "pocat"],
-        metadata={
-            "surface": "streamlit",
-            "app": "pocat",
-        },
-    ):
-        with langfuse_observation(
-            name="streamlit_chat_turn",
-            as_type="span",
-            input={
-                "user_query": user_query,
-                "prompt": graph_prompt,
-                "conversation_length": len(graph_messages),
-                "customer_id": target_customer.get("customer_id") if target_customer else explicit_customer_id,
-            },
-            metadata={"surface": "streamlit"},
-        ) as observation:
-            result = st.session_state.graph.invoke(
-                {
-                    "messages": graph_messages,
-                    "user_query": user_query,
-                    "next": "",
-                    "member_id": str(target_customer.get("customer_id")) if target_customer else None,
-                    "customer_id": target_customer.get("customer_id") if target_customer else explicit_customer_id,
-                    "customer_profile": customer_profile,
-                    "customer_accounts": customer_accounts,
-                    "context": graph_context,
-                    "plan": [],
-                    "current_step": 0,
-                    "agent_outputs": {},
+    inputs = {
+        "messages": graph_messages,
+        "user_query": user_query,
+        "next": "",
+        "member_id": str(target_customer.get("customer_id")) if target_customer else None,
+        "customer_id": target_customer.get("customer_id") if target_customer else explicit_customer_id,
+        "customer_profile": customer_profile,
+        "customer_accounts": customer_accounts,
+        "context": graph_context,
+        "plan": [],
+        "current_step": 0,
+        "agent_outputs": {},
+    }
+
+    q = queue.Queue()
+
+    def worker():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        async def run_graph():
+            try:
+                q.put({"type": "status", "content": "질문 분석 중..."})
+                
+                ai_content = ""
+                final_output = None
+
+                agent_status_mapping = {
+                    "supervisor": "질문 분석 중...",
+                    "customer_agent": "고객 정보 조회 중...",
+                    "product_agent": "상품 목록 및 약관 검색 중...",
+                    "eligibility_agent": "가입 자격 및 우대조건 분석 중...",
+                    "financial_agent": "금융 이자 및 시뮬레이션 계산 중...",
+                    "recommend_agent": "맞춤 상품 비교 및 추천 중...",
+                    "validation_agent": "추천 결과 검증 중...",
                 }
+
+                with langfuse_trace_context(
+                    trace_name="streamlit-chat-turn",
+                    session_id=langfuse_session_id,
+                    tags=["streamlit", "pocat"],
+                    metadata={
+                        "surface": "streamlit",
+                        "app": "pocat",
+                    },
+                ):
+                    with langfuse_observation(
+                        name="streamlit_chat_turn",
+                        as_type="span",
+                        input={
+                            "user_query": user_query,
+                            "prompt": graph_prompt,
+                            "conversation_length": len(graph_messages),
+                            "customer_id": target_customer.get("customer_id") if target_customer else explicit_customer_id,
+                        },
+                        metadata={"surface": "streamlit"},
+                    ) as observation:
+                        
+                        async for event in graph.astream_events(inputs, version="v2"):
+                            kind = event["event"]
+                            
+                            if kind == "on_chain_start":
+                                node_name = event["metadata"].get("langgraph_node")
+                                if node_name in agent_status_mapping:
+                                    msg = agent_status_mapping[node_name]
+                                    state_plan = event.get("data", {}).get("input", {}).get("plan") or []
+                                    if node_name == "supervisor" and (ai_content or state_plan):
+                                        msg = "답변 정리 및 작성 중..."
+                                    q.put({"type": "status", "content": msg})
+                            
+                            elif kind == "on_chat_model_stream":
+                                node_name = event["metadata"].get("langgraph_node")
+                                if node_name == "supervisor":
+                                    token = event["data"]["chunk"].content
+                                    if token:
+                                        ai_content += token
+                                        q.put({"type": "token", "content": token})
+                            
+                            elif kind == "on_chain_end":
+                                if isinstance(event["data"].get("output"), dict) and "messages" in event["data"]["output"]:
+                                    final_output = event["data"]["output"]
+
+                        if not ai_content and final_output:
+                            ai_message = final_output["messages"][-1]
+                            ai_content = ai_message.content if hasattr(ai_message, "content") else str(ai_message)
+
+                        ai_content = ai_content.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+                        
+                        if observation is not None:
+                            observation.update(
+                                output={
+                                    "response_preview": ai_content[:500],
+                                    "message_count": len(graph_messages) + 1,
+                                }
+                            )
+
+                flush_langfuse()
+                q.put({"type": "done", "content": ai_content})
+
+            except Exception as e:
+                q.put({"type": "error", "content": str(e)})
+
+        loop.run_until_complete(run_graph())
+        loop.close()
+
+    from streamlit.runtime.scriptrunner import add_script_run_ctx
+    t = threading.Thread(target=worker)
+    add_script_run_ctx(t)
+    t.start()
+
+    status_placeholder = assistant_slot.empty() if assistant_slot else st.empty()
+    chat_placeholder = assistant_slot.empty() if assistant_slot else st.empty()
+
+    def render_loading_ui(msg: str):
+        status_placeholder.markdown(
+            f"""
+            <style>
+                @keyframes spin {{
+                    0% {{ transform: rotate(0deg); }}
+                    100% {{ transform: rotate(360deg); }}
+                }}
+            </style>
+            <div class="chat-label" style="display: flex; align-items: center; gap: 6px;">
+                AI 금융 도우미
+                <span style="
+                    display: inline-block;
+                    width: 12px;
+                    height: 12px;
+                    border: 2px solid #e2e6ef;
+                    border-top: 2px solid #ffcc00;
+                    border-radius: 50%;
+                    animation: spin 0.8s linear infinite;
+                "></span>
+            </div>
+            <div class="chat-bubble assistant" style="padding: 0.8rem; background-color: #f0f2f6; border-radius: 8px; font-size: 0.9rem; color: #5f6673; border-left: 4px solid #ffcc00; display: flex; align-items: center; gap: 8px;">
+                <span style="color: #ffcc00; font-size: 1.1rem; animation: pulse 1.5s infinite; margin-right: 4px;">●</span>
+                <strong>{msg}</strong>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    ai_content = ""
+    status_active = True
+
+    while True:
+        try:
+            msg = q.get(timeout=0.05)
+        except queue.Empty:
+            time.sleep(0.01)
+            continue
+
+        if msg["type"] == "status":
+            if status_active:
+                render_loading_ui(msg["content"])
+        elif msg["type"] == "token":
+            if status_active:
+                status_placeholder.empty()
+                status_active = False
+            ai_content += msg["content"]
+            chat_placeholder.markdown(
+                f"""
+                <div class="chat-label">AI 금융 도우미</div>
+                <div class="chat-bubble assistant">
+                {_sanitize_chat_markdown(ai_content)}
+                </div>
+                """,
+                unsafe_allow_html=True
             )
+        elif msg["type"] == "done":
+            status_placeholder.empty()
+            final_content = msg["content"]
 
-            ai_message = result["messages"][-1]
-            ai_content = ai_message.content if hasattr(ai_message, "content") else str(ai_message)
-            ai_content = ai_content.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+            # 스트리밍 토큰이 한 번도 안 왔으면 단어 단위 점진 출력
+            if not ai_content and final_content:
+                words = final_content.split(" ")
+                simulated = ""
+                for word in words:
+                    simulated += word + " "
+                    chat_placeholder.markdown(
+                        f"""
+                        <div class="chat-label">AI 금융 도우미</div>
+                        <div class="chat-bubble assistant">
+                        {_sanitize_chat_markdown(simulated)}
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+                    time.sleep(0.03)
 
-            if observation is not None:
-                observation.update(
-                    output={
-                        "response_preview": ai_content[:500],
-                        "message_count": len(result.get("messages") or []),
-                    }
-                )
+            ai_content = final_content
+            chat_placeholder.markdown(
+                f"""
+                <div class="chat-label">AI 금융 도우미</div>
+                <div class="chat-bubble assistant">
+                {_sanitize_chat_markdown(ai_content)}
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+            break
+        elif msg["type"] == "error":
+            t.join()
+            raise Exception(msg["content"])
 
-    flush_langfuse()
+    t.join()
+    st.session_state.conversation_messages = graph_messages
     return ai_content
 
 
@@ -1442,27 +1604,26 @@ def _handle_prompt(prompt: str, chat_container=None) -> None:
             with assistant_slot.container():
                 _render_chat_loading()
 
-    with st.spinner("내 상황에 맞는 답변을 준비하고 있습니다."):
-        try:
-            ai_content = _run_assistant(prompt)
-            st.session_state.messages.append({"role": "assistant", "content": ai_content})
-            st.session_state.conversation_messages = _build_next_conversation(
-                st.session_state.messages[:-2],
-                prompt,
-                ai_content,
-            )
-            if assistant_slot is not None:
-                assistant_slot.empty()
-                with assistant_slot.container():
-                    _render_chat_message("assistant", ai_content)
-        except Exception as error:
-            error_msg = f"답변을 생성하는 중 오류가 발생했습니다: {error}"
-            st.error(error_msg)
-            st.session_state.messages.append({"role": "assistant", "content": error_msg})
-            if assistant_slot is not None:
-                assistant_slot.empty()
-                with assistant_slot.container():
-                    _render_chat_message("assistant", error_msg)
+    try:
+        ai_content = _run_assistant(prompt, assistant_slot)
+        st.session_state.messages.append({"role": "assistant", "content": ai_content})
+        st.session_state.conversation_messages = _build_next_conversation(
+            st.session_state.messages[:-2],
+            prompt,
+            ai_content,
+        )
+        if assistant_slot is not None:
+            assistant_slot.empty()
+            with assistant_slot.container():
+                _render_chat_message("assistant", ai_content)
+    except Exception as error:
+        error_msg = f"답변을 생성하는 중 오류가 발생했습니다: {error}"
+        st.error(error_msg)
+        st.session_state.messages.append({"role": "assistant", "content": error_msg})
+        if assistant_slot is not None:
+            assistant_slot.empty()
+            with assistant_slot.container():
+                _render_chat_message("assistant", error_msg)
             flush_langfuse()
 
 

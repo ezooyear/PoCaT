@@ -13,6 +13,7 @@ from agents.base import (
     build_agent_trace_output,
     make_agent_result,
     run_agent_loop,
+    run_agent_loop_async,
 )
 from agents.customer.prompts import CUSTOMER_SYSTEM_PROMPT
 from agents.customer.tools import CUSTOMER_TOOLS
@@ -57,7 +58,7 @@ def _customer_name_from_id(customer_id: int) -> str:
     return f"고객_{customer_id:03d}"
 
 
-def _run_required_customer_lookups(customer_name: str) -> tuple[list[dict[str, Any]], list[str]]:
+async def _run_required_customer_lookups_async(customer_name: str) -> tuple[list[dict[str, Any]], list[str]]:
     tool_results: list[dict[str, Any]] = []
     tool_errors: list[str] = []
 
@@ -65,7 +66,7 @@ def _run_required_customer_lookups(customer_name: str) -> tuple[list[dict[str, A
         tool_name = tool.name
         tool_args = {"customer_name": customer_name}
         try:
-            result = tool.invoke(tool_args)
+            result = await tool.ainvoke(tool_args)
         except Exception as error:
             result = f"Tool execution error: {error}"
             tool_errors.append(result)
@@ -90,7 +91,7 @@ def _build_lookup_summary(customer_name: str, tool_results: list[dict[str, Any]]
     return "\n".join(sections).strip()
 
 
-def customer_agent_node(state: AgentState) -> dict:
+async def customer_agent_node(state: AgentState) -> dict:
     """
     Customer Agent 노드.
 
@@ -130,7 +131,7 @@ def customer_agent_node(state: AgentState) -> dict:
                     input={"customer_name": customer_name, "tool_count": len(CUSTOMER_TOOLS)},
                     metadata={"agent": "customer_agent", "step": "evaluate"},
                 ) as evaluation_observation:
-                    tool_results, tool_errors = _run_required_customer_lookups(customer_name)
+                    tool_results, tool_errors = await _run_required_customer_lookups_async(customer_name)
                     summary = _build_lookup_summary(customer_name, tool_results)
                     customer_profile = _extract_customer_profile(tool_results)
                     update_observation(
@@ -200,7 +201,7 @@ def customer_agent_node(state: AgentState) -> dict:
         finally:
             flush_langfuse()
 
-    return run_agent_loop(
+    return await run_agent_loop_async(
         state=state,
         system_prompt=CUSTOMER_SYSTEM_PROMPT,
         tools=CUSTOMER_TOOLS,

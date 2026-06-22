@@ -12,8 +12,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from agents.eligibility.agent import eligibility_agent_node
-from agents.recommend.agent import recommend_agent_node
+import asyncio
+from agents.eligibility.agent import eligibility_agent_node as _orig_eligibility
+from agents.recommend.agent import recommend_agent_node as _orig_recommend
+
+eligibility_agent_node = lambda state: asyncio.run(_orig_eligibility(state))
+recommend_agent_node = lambda state: asyncio.run(_orig_recommend(state))
 
 
 def make_base_state() -> dict:

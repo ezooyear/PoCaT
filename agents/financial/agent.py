@@ -7,7 +7,7 @@ from datetime import date, datetime
 from typing import Any
 
 from graph.state import AgentState
-from agents.base import run_agent_loop
+from agents.base import run_agent_loop, run_agent_loop_async
 from agents.financial.prompts import FINANCIAL_SYSTEM_PROMPT
 from agents.financial.tools import FINANCIAL_TOOLS, compare_switch_benefit
 
@@ -19,8 +19,8 @@ except Exception:
 DEFAULT_TAX_RATE = 0.154
 
 
-def financial_agent_node(state: AgentState) -> dict:
-    result = run_agent_loop(
+async def financial_agent_node(state: AgentState) -> dict:
+    result = await run_agent_loop_async(
         state=state,
         system_prompt=FINANCIAL_SYSTEM_PROMPT,
         tools=FINANCIAL_TOOLS,

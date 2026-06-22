@@ -14,7 +14,7 @@ import re
 import time
 from typing import Any
 
-from agents.base import make_agent_result, run_agent_loop
+from agents.base import make_agent_result, run_agent_loop, run_agent_loop_async
 from agents.product.prompts import PRODUCT_SYSTEM_PROMPT
 from agents.product.tools import PRODUCT_TOOLS, extract_product_candidates_from_search_results
 from graph.state import AgentState
@@ -281,7 +281,7 @@ def _analyze_product_result_storage(result: dict) -> dict[str, Any]:
 # main node
 # ---------------------------------------------------------------------------
 
-def product_agent_node(state: AgentState) -> dict:
+async def product_agent_node(state: AgentState) -> dict:
     start_time = time.time()
 
     available_tool_names = _tool_names_in_registry()
@@ -394,7 +394,7 @@ def product_agent_node(state: AgentState) -> dict:
 
                 try:
                     llm = get_llm(temperature=0)
-                    response = llm.invoke(messages)
+                    response = await llm.ainvoke(messages)
                     reformed_query = str(getattr(response, "content", response) or "").strip()
                     reformed_query = reformed_query.replace("'", "").replace('"', "")
                     if not reformed_query:
@@ -402,7 +402,7 @@ def product_agent_node(state: AgentState) -> dict:
                 except Exception:
                     reformed_query = "KB국민은행 예적금 상품 종류 금리 가입대상 조건 우대이율"
 
-                tool_result_str = search_terms.invoke({"query": reformed_query})
+                tool_result_str = await search_terms.ainvoke({"query": reformed_query})
 
                 tool_results_list = [{
                     "tool_name": "search_terms",
@@ -438,7 +438,7 @@ def product_agent_node(state: AgentState) -> dict:
                     "product_result": structured_result,
                 }
             else:
-                result = run_agent_loop(
+                result = await run_agent_loop_async(
                     state=state,
                     system_prompt=PRODUCT_SYSTEM_PROMPT,
                     tools=PRODUCT_TOOLS,

@@ -24,6 +24,7 @@ import json
 from typing import Any
 
 from langchain_core.messages import SystemMessage, AIMessage
+from langchain_core.runnables import RunnableConfig
 
 from config.settings import get_llm
 from graph.state import AgentState
@@ -59,7 +60,7 @@ TASK_TYPES = [
 MAX_PLAN_LENGTH = 6
 
 
-def supervisor_node(state: AgentState) -> dict:
+async def supervisor_node(state: AgentState, config: RunnableConfig = None) -> dict:
     """
     Supervisor 메인 노드.
 
@@ -73,7 +74,7 @@ def supervisor_node(state: AgentState) -> dict:
     plan = state.get("plan") or []
 
     if not plan:
-        return _plan_mode(state)
+        return await _plan_mode_async(state, config)
 
     # 일반 대화가 이미 직접 응답으로 끝난 경우
     if plan == ["FINISH"]:
@@ -82,10 +83,10 @@ def supervisor_node(state: AgentState) -> dict:
             "final_answer": state.get("final_answer"),
         }
 
-    return _synthesize_mode(state)
+    return await _synthesize_mode_async(state, config)
 
 
-def _plan_mode(state: AgentState) -> dict:
+async def _plan_mode_async(state: AgentState, config: RunnableConfig = None) -> dict:
     """
     사용자 질문을 분석해 task_type과 plan을 생성한다.
     규칙 기반 routing을 먼저 적용하고, 일반 대화/애매한 질문은 LLM routing으로 보완한다.
@@ -123,7 +124,7 @@ def _plan_mode(state: AgentState) -> dict:
     # 2차: 규칙으로 일반 대화로만 잡힌 경우 LLM에게 판단 요청
     # 단, 진짜 인사/감사 표현이면 direct response로 처리된다.
     if routing.get("task_type") == "casual":
-        llm_routing = _llm_plan_routing(state_messages)
+        llm_routing = await _llm_plan_routing_async(state_messages, config)
         normalized = _normalize_routing(llm_routing, user_query)
 
         # LLM이 유의미한 plan을 만들었으면 사용
@@ -138,7 +139,7 @@ def _plan_mode(state: AgentState) -> dict:
     plan = routing.get("plan", ["FINISH"])
 
     if task_type == "casual" or plan == ["FINISH"]:
-        return _direct_response(state, user_query)
+        return await _direct_response_async(state, user_query, config)
 
     next_agent = plan[0]
 
@@ -164,13 +165,21 @@ def _plan_mode(state: AgentState) -> dict:
     }
 
 
-def _synthesize_mode(state: AgentState) -> dict:
+def _sanitize_chat_markdown(content: str) -> str:
+    import re
+    text = str(content or "")
+    text = re.sub(r"```[\w+-]*\s*```", "", text, flags=re.MULTILINE)
+    text = re.sub(r"(?m)^\s*`{3,}\s*$\n^\s*`{3,}\s*$", "", text)
+    return text.strip()
+
+
+async def _synthesize_mode_async(state: AgentState, config: RunnableConfig = None) -> dict:
     """
     모든 Agent 실행 후 State를 종합하여 최종 답변을 생성한다.
     agent_outputs뿐 아니라 구조화된 개별 result 필드를 함께 사용한다.
     """
 
-    llm = get_llm()
+    llm = get_llm(temperature=0, streaming=True)
 
     user_query = state.get("user_query") or _get_last_user_text(state.get("messages", []))
     final_context = _build_final_context(state, user_query)
@@ -204,8 +213,11 @@ def _synthesize_mode(state: AgentState) -> dict:
     messages = [SystemMessage(content=prompt)] + list(state.get("messages", []))
 
     try:
-        response = llm.invoke(messages)
-        final_answer = _clean_text(response.content)
+        full_content = ""
+        async for chunk in llm.astream(messages, config=config):
+            if chunk.content:
+                full_content += chunk.content
+        final_answer = _clean_text(full_content)
 
     except Exception as e:
         final_answer = _fallback_final_answer(final_context, error=e)
@@ -229,7 +241,7 @@ def _synthesize_mode(state: AgentState) -> dict:
     }
 
 
-def _llm_plan_routing(messages: list) -> dict:
+async def _llm_plan_routing_async(messages: list) -> dict:
     """
     LLM 기반 plan 생성.
     """
@@ -238,7 +250,7 @@ def _llm_plan_routing(messages: list) -> dict:
 
     try:
         request_messages = [SystemMessage(content=SUPERVISOR_PLAN_PROMPT)] + messages
-        response = llm.invoke(request_messages)
+        response = await llm.ainvoke(request_messages)
         return _parse_plan_response(response.content.strip())
 
     except Exception:
@@ -646,20 +658,23 @@ def _fallback_routing(user_query: str) -> dict:
     }
 
 
-def _direct_response(state: AgentState, user_query: str) -> dict:
+async def _direct_response_async(state: AgentState, user_query: str, config: RunnableConfig = None) -> dict:
     """
     일반 대화에 대해 Supervisor가 직접 응답한다.
     """
 
-    llm = get_llm()
+    llm = get_llm(temperature=0, streaming=True)
 
     try:
         messages = [
             SystemMessage(content=SUPERVISOR_DIRECT_RESPONSE_PROMPT),
         ] + list(state.get("messages", []))
 
-        response = llm.invoke(messages)
-        answer = _clean_text(response.content)
+        full_content = ""
+        async for chunk in llm.astream(messages, config=config):
+            if chunk.content:
+                full_content += chunk.content
+        answer = _clean_text(full_content)
 
     except Exception:
         answer = (
@@ -1072,7 +1087,8 @@ def _clean_text(text: str) -> str:
 _original_supervisor_node = supervisor_node
 
 
-def supervisor_node(state: AgentState) -> dict:
+async def supervisor_node(state: AgentState, config: RunnableConfig = None) -> dict:
+
     plan = state.get("plan") or []
     mode = "plan" if not plan else "synthesize"
 
@@ -1086,7 +1102,7 @@ def supervisor_node(state: AgentState) -> dict:
         },
         metadata={"agent": "supervisor", "mode": mode},
     ) as observation:
-        result = _original_supervisor_node(state)
+        result = await _original_supervisor_node(state, config)
         update_observation(
             observation,
             output={

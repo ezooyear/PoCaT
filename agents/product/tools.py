@@ -94,7 +94,7 @@ INVALID_PRODUCT_NAME_MARKERS = [
 # RAG query
 # ---------------------------------------------------------------------------
 
-def reformulate_query(query: str) -> str:
+async def reformulate_query_async(query: str) -> str:
     """사용자 질문을 RAG 검색에 최적화된 형태로 재정형합니다."""
     # 종합 추천, 비교 질문인 경우 RAG 검색 결과의 일관성 및 전체 상품 수집을 위해 고정 쿼리 사용
     is_comparative = any(
@@ -127,7 +127,7 @@ def reformulate_query(query: str) -> str:
             HumanMessage(content=f"사용자 질문: '{query}'"),
         ]
 
-        response = llm.invoke(messages)
+        response = await llm.ainvoke(messages)
         reformed = str(getattr(response, "content", response) or "").strip()
         reformed = reformed.replace("'", "").replace('"', "")
 
@@ -138,7 +138,7 @@ def reformulate_query(query: str) -> str:
 
 
 @tool
-def search_terms(query: str) -> str:
+async def search_terms(query: str) -> str:
     """
     상품의 약관, 상세 조건, 가입 조건, 우대금리 요건,
     가입 제한 나이/금액, 유의사항 등을 PDF 문서에서 검색합니다.
@@ -152,8 +152,9 @@ def search_terms(query: str) -> str:
 
     target_k = 5 if is_comparative else 3
 
-    reformed_query = reformulate_query(query)
-    results = search_products(reformed_query, k=target_k)
+    reformed_query = await reformulate_query_async(query)
+    from db.vectorstore import search_products_async
+    results = await search_products_async(reformed_query, k=target_k)
 
     if not results:
         return "검색된 약관 정보가 없습니다. Vector DB가 구축되지 않았거나 관련 정보가 없습니다."
@@ -166,6 +167,7 @@ def search_terms(query: str) -> str:
         output.append(f"[{i}] 출처: {source} / p.{page}\n{doc.page_content}")
 
     return "\n\n---\n\n".join(output)
+
 
 
 # ---------------------------------------------------------------------------
