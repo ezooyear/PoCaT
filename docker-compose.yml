@@ -1,0 +1,89 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pocat-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-postgres}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-pocat_password}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mcp:
+    image: pocat-app
+    build: .
+    container_name: pocat-mcp
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-postgres}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-pocat_password}
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8000
+    command: ["python", "-m", "mcp_servers.postgres_mcp_server"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    image: pocat-app
+    build: .
+    container_name: pocat-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-postgres}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-pocat_password}
+      USE_MCP_DB: "true"
+      MCP_POSTGRES_URL: http://mcp:8000/mcp
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data/pdfs:/app/data/pdfs:ro
+      - chroma_data:/app/data/chroma_db
+      - hf_cache:/app/.cache/huggingface
+      - st_cache:/app/.cache/sentence-transformers
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mcp:
+        condition: service_started
+
+  vectorstore:
+    image: pocat-app
+    build: .
+    profiles:
+      - tools
+    env_file:
+      - .env
+    command: ["python", "scripts/build_vectorstore.py"]
+    volumes:
+      - ./data/pdfs:/app/data/pdfs:ro
+      - chroma_data:/app/data/chroma_db
+      - hf_cache:/app/.cache/huggingface
+      - st_cache:/app/.cache/sentence-transformers
+
+volumes:
+  postgres_data:
+  chroma_data:
+  hf_cache:
+  st_cache:

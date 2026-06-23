@@ -1,3 +1,7 @@
+# Runtime requirements for Docker Compose app/mcp/vectorstore services.
+# Heavier optional tooling such as RAGAS evaluation and A2A server dependencies
+# stays in requirements.txt for local development.
+
 # LangChain & LangGraph
 langchain>=0.3.0
 langgraph>=0.2.0
@@ -29,12 +33,8 @@ torch
 # UI
 streamlit>=1.30.0
 
-# Observability
+# Optional observability used lazily when Langfuse keys are configured.
 langfuse>=4.7.0
-ragas>=0.2.4
 
 # MCP
 mcp[cli]>=1.27,<2
-
-# A2A
-a2a-sdk[http-server]
