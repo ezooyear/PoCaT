@@ -1,0 +1,13 @@
+.git
+.agents
+.codex
+.codex_run
+.vscode
+venv
+.venv
+__pycache__
+*.pyc
+.env
+.DS_Store
+data/chroma_db
+*.db

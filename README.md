@@ -103,6 +103,22 @@ deposit_agent/
 
 ## 🚀 설치 및 실행
 
+### Docker로 PostgreSQL 바로 실행
+로컬 PC에 PostgreSQL을 따로 설치하지 않아도 Docker가 공식 PostgreSQL 이미지를 받아서 실행합니다. 앱은 기존 시스템과 동일하게 `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` 환경변수로 PostgreSQL에 직접 연결합니다.
+
+1. `.env.example`을 복사해 `.env`를 만들고 `OPENROUTER_API_KEY`를 입력합니다.
+2. 프로젝트 루트에서 아래 명령어를 실행합니다.
+
+```bash
+docker compose up --build
+```
+
+- Streamlit: http://localhost:8501
+- PostgreSQL: `localhost:5432`
+- MCP PostgreSQL Server: http://localhost:8000/mcp
+
+처음 실행하면 `docker/postgres/init/001_schema.sql`이 고객, 상품, 계좌, 납입 이력 테이블과 기본 테스트 데이터를 자동으로 만듭니다. DB 데이터는 `postgres_data` Docker volume에 저장되므로 컨테이너를 다시 실행해도 유지됩니다.
+
 ### 1. 가상환경 및 패키지 설치
 ```bash
 python -m venv venv

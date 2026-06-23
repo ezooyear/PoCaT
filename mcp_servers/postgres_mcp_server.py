@@ -6,6 +6,8 @@ PostgreSQL MCP Server
 - SELECT 쿼리만 허용하는 기존 보안 정책을 유지합니다.
 """
 
+import os
+
 from mcp.server.fastmcp import FastMCP
 
 from db.postgres_db import DB_SCHEMA, execute_query, test_connection, validate_sql
@@ -15,6 +17,8 @@ mcp = FastMCP(
     "PoCaT PostgreSQL MCP Server",
     json_response=True,
     stateless_http=True,
+    host=os.getenv("MCP_HOST", "127.0.0.1"),
+    port=int(os.getenv("MCP_PORT", "8000")),
 )
 
 
