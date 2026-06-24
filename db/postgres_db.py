@@ -49,6 +49,25 @@ DB_SCHEMA = """
 | available_monthly_saving | INT | 월 가용 저축액 |
 | updated_at | DATE | 정보 갱신일 |
 
+### 2. products (상품 정보)
+| 컬럼 | 타입 | 설명 |
+|---|---|---|
+| product_id | INT (PK) | 상품 고유 ID |
+| product_name | VARCHAR | 상품명 |
+| product_type | VARCHAR | 상품 유형 (예금/적금 등) |
+| min_amount | BIGINT | 최소 가입 또는 월 납입 금액 |
+| max_amount | BIGINT | 최대 가입 또는 월 납입 금액 |
+| min_period_months | INT | 최소 가입 기간(개월) |
+| max_period_months | INT | 최대 가입 기간(개월) |
+| base_rate | NUMERIC(5,2) | 기본 금리(%) |
+| max_rate | NUMERIC(5,2) | 최고 금리(%) |
+| age_min | INT | 최소 가입 가능 연령 |
+| age_max | INT | 최대 가입 가능 연령 |
+| rag_document_key | VARCHAR | 연결된 약관/RAG 문서 키 |
+| is_active | BOOLEAN | 활성 상품 여부 |
+
+> 위 `products` 컬럼은 `app.py`의 `FROM products` 조회, `customer_accounts`와의 조인, 그리고 agent 코드에서 참조하는 필드를 기준으로 정리했습니다.
+
 ### 3. customer_accounts (고객 계좌)
 | 컬럼 | 타입 | 설명 |
 |---|---|---|

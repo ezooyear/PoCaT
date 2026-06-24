@@ -1,6 +1,6 @@
 # 🏦 예적금 상담 멀티 에이전트 (Deposit Agent)
 
-LangGraph 기반의 **Supervisor 통제형 A2A(Agent-to-Agent) 협업 루프** 아키텍처를 적용한 지능형 예적금 상담 AI 어시스턴트입니다. 
+LangGraph 기반의 **Supervisor 통제형 shared-state 멀티 에이전트 아키텍처**를 적용한 지능형 예적금 상담 AI 어시스턴트입니다. 
 자연어 데이터베이스 조회(NL2SQL)와 문서 기반 검색(RAG)을 통해 사람 수준의 금융 컨설팅을 제공합니다.
 
 ---
@@ -17,8 +17,8 @@ LangGraph 기반의 **Supervisor 통제형 A2A(Agent-to-Agent) 협업 루프** �
 
 ## 🏗 시스템 아키텍처
 
-### 1. 멀티 에이전트 구조 (Supervisor 통제형 A2A 패턴)
-Supervisor가 실행 계획을 수립하면, 에이전트들이 직접 바톤을 넘기며 협업(A2A)한 뒤 최종 결과를 Supervisor가 취합합니다.
+### 1. 멀티 에이전트 구조 (Supervisor 통제형 shared-state orchestration)
+여러 Agent는 Supervisor의 실행 계획에 따라 LangGraph shared state를 통해 순차적으로 협업합니다. 각 Agent의 결과는 `AgentState`에 저장되며, 후속 Agent가 이를 참조합니다. 내부 추천 파이프라인은 agent 간 직접 A2A 메시징이 아니며, 별도로 A2A 서버를 구현하여 외부 client 관점에서 AgentCard discovery 및 JSON-RPC 요청을 검증할 수 있도록 구성했습니다.
 
 - **`Supervisor`**: 사용자의 질문을 분석하여 실행 계획(Plan)을 수립하고, 6개의 전문 에이전트를 조합 실행한 뒤 최종 응답을 취합합니다.
 - **`Customer Agent`**: 고객의 프로필, 계좌 현황, 납입 이력 데이터를 PostgreSQL DB에서 **SQL 기반으로 전담 조회**합니다 (내부에 `_nl2sql_query` 함수를 독점 캡슐화).
@@ -92,7 +92,7 @@ deposit_agent/
 │   └── vectorstore.py               # RAG 문서 로드 및 Vector DB 구축
 ├── graph/                           # LangGraph 상태(State) 정의 및 그래프 빌더
 │   ├── state.py                     # AgentState 정의
-│   └── builder.py                   # A2A 협업 루프 그래프 구성
+│   └── builder.py                   # Supervisor 통제형 LangGraph 실행 그래프 구성
 ├── scripts/                         # 유틸리티 스크립트 (build_vectorstore.py)
 ├── app.py                           # Streamlit 웹 기반 사용자 인터페이스
 ├── .env                             # 환경 변수 및 설정 (DB, API Key 등)
@@ -162,6 +162,9 @@ streamlit run app.py
 python -m a2a_servers.pocat_a2a_server
 ```
 
+A2A 실행 전에는 의존성 설치 상태를 먼저 확인해 주세요.
+MCP/A2A 검증 방법은 `docs/mcp_a2a_verification.md` 문서를 참고해주세요.
+
 ## ✅ 구현 단계 (Roadmap)
 - [x] Phase 1: 기본 챗봇 기반 마련 및 환경 설정
 - [x] Phase 2: LangGraph 멀티 에이전트 아키텍처(Supervisor 패턴) 도입
@@ -169,6 +172,6 @@ python -m a2a_servers.pocat_a2a_server
 - [x] Phase 4: PostgreSQL NL2SQL 및 하이브리드 RAG 연동
 - [x] Phase 5: 고급 금융 분석 기능(중도해지, 갈아타기, 이자계산) 구현 및 Streamlit UI 통합
 - [x] Phase 6: 에이전트 역할 세분화 (6개 에이전트) 및 도구 특화 적용
-- [x] Phase 7: Customer Agent 신설, 에이전트별 디렉토리 구조 리팩터링, Supervisor 통제형 A2A 협업 루프 도입
+- [x] Phase 7: Customer Agent 신설, 에이전트별 디렉토리 구조 리팩터링, Supervisor 통제형 shared-state 실행 루프 도입
 - [x] Phase 8: 상품 정보 RAG 전용화(DB SQL 조회 차단), 루트 tools 폴더 삭제 및 customer_agent 내부 캡슐화 완료
 

@@ -1,8 +1,9 @@
 # PoCaT 컴포넌트 설계문서
 
 > **현재 구현 기준** (2026-06-20)
-> 실제 구현은 LangGraph shared-state 기반 Supervisor 통제형 순차 실행입니다.
-> README의 "A2A" 표현은 설계 의도이며, 현재 코드에서는 agent 간 직접 통신이 없습니다.
+> 현재 내부 추천 파이프라인은 LangGraph shared-state 기반 Supervisor 통제형 순차 실행입니다.
+> agent 간 직접 네트워크 통신이나 A2A JSON-RPC 직접 호출은 없으며, 각 agent는 자신의 처리 결과를 `AgentState`의 `{agent}_result` 키에 저장하고 후속 agent가 이를 참조합니다.
+> 별도 A2A 서버는 내부 agent 간 직접 호출 방식이 아니라, 외부 client가 AgentCard discovery 및 JSON-RPC 요청을 검증할 수 있는 인터페이스로 구현되어 있습니다.
 
 ---
 
@@ -32,7 +33,7 @@
 [Streamlit App] → 사용자
 ```
 
-모든 agent는 `AgentState`(TypedDict)를 공유하며, 자신의 결과를 `{agent}_result` 키에 저장합니다.
+모든 agent는 `AgentState`(TypedDict)를 공유하며, 자신의 결과를 `{agent}_result` 키에 저장합니다. 후속 agent는 이 shared state를 읽어 작업을 이어가므로, 협업은 존재하지만 구현 방식은 직접 A2A 통신이 아니라 shared-state 기반 간접 전달입니다.
 
 ---
 
