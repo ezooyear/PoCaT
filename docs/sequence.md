@@ -1,8 +1,8 @@
 # PoCaT Agent 실행 순서 설계문서
 
 > **현재 구현 기준** (2026-06-20)
-> 현재 구현은 agent 간 직접 통신(A2A)이 아니라, **Supervisor 통제형 LangGraph 순차 실행**입니다.
-> 각 agent는 shared state에 결과를 저장하고, 다음 agent가 이를 읽는 방식으로 협력합니다.
+> 현재 내부 추천 파이프라인은 **Supervisor 통제형 LangGraph shared-state 순차 실행**입니다.
+> agent 간 직접 네트워크 통신이나 A2A JSON-RPC 호출은 없으며, 각 agent는 shared state에 결과를 저장하고 다음 agent가 이를 읽는 방식으로 협력합니다.
 
 ---
 
@@ -268,7 +268,7 @@ supervisor_node (plan_mode)
 
 ## 6. 현재 구현상 주의사항
 
-1. **순차 실행, A2A 아님**: 현재 구현은 agent 간 직접 통신이 없습니다. Supervisor가 계획(`plan`)을 수립하면 LangGraph가 순서대로 agent를 실행하고, 각 agent는 shared state를 읽고 씁니다.
+1. **Supervisor-mediated shared-state orchestration**: 현재 구현은 agent 간 직접 A2A 메시징이 아니라, Supervisor가 계획(`plan`)을 수립하고 LangGraph가 순서대로 agent를 실행하는 구조입니다. 각 agent는 shared state를 읽고 쓰며 결과를 간접 전달합니다.
 
 2. **Shared State 기반 데이터 전달**: Product Agent의 결과(`product_result`)를 Eligibility Agent가 state에서 직접 읽습니다. 별도 메시지 패싱이나 큐가 없습니다.
 

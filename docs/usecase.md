@@ -2,6 +2,8 @@
 
 > **현재 구현 기준** (2026-06-20)
 > README에 "A2A"로 표현된 부분도 실제 구현은 LangGraph shared-state 기반 순차 실행입니다.
+> 각 agent는 `AgentState`의 `{agent}_result` 키에 결과를 저장하고, 후속 agent가 이를 참조합니다.
+> 별도 A2A 서버는 내부 agent 간 직접 통신이 아니라 외부 client 검증용 인터페이스입니다.
 
 ---
 
