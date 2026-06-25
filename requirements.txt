@@ -6,6 +6,7 @@ langchain-core>=0.3.0
 
 # Environment
 python-dotenv>=1.0.0
+tenacity>=9.0.0
 
 # Data
 requests>=2.31.0

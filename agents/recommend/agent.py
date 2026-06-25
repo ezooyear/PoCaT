@@ -298,20 +298,50 @@ def _load_product_candidates(state: AgentState, agent_outputs: dict) -> list[dic
 def _load_financial_results(state: AgentState, agent_outputs: dict) -> list[dict]:
     financial_results = state.get("financial_results")
     if isinstance(financial_results, list) and financial_results:
-        return financial_results
+        return _filter_usable_financial_results(financial_results)
 
     financial_path = get_financial_calculations(state)
     if isinstance(financial_path.get("data"), list) and financial_path.get("data"):
-        return financial_path["data"]
+        return _filter_usable_financial_results(financial_path["data"])
 
     financial_result = state.get("financial_result")
     if financial_result:
         extracted = _extract_financial_results_from_container(financial_result)
         if extracted:
-            return extracted
+            return _filter_usable_financial_results(extracted)
 
     financial_agent_output = agent_outputs.get("financial_agent", "")
-    return _extract_financial_results_from_container(financial_agent_output)
+    return _filter_usable_financial_results(_extract_financial_results_from_container(financial_agent_output))
+
+
+def _filter_usable_financial_results(financial_results: list[dict]) -> list[dict]:
+    usable_results: list[dict] = []
+
+    for item in financial_results:
+        if not isinstance(item, dict):
+            continue
+
+        status = str(item.get("status") or "").strip().lower()
+        if status in {"needs_check", "failed", "error"}:
+            continue
+
+        has_amounts = any(
+            item.get(key) not in (None, "", [])
+            for key in (
+                "estimated_interest",
+                "estimated_interest_after_tax",
+                "estimated_maturity_amount",
+                "maturity_amount",
+                "total_principal",
+                "principal",
+            )
+        )
+        if not has_amounts:
+            continue
+
+        usable_results.append(dict(item))
+
+    return usable_results
 
 
 def _extract_financial_results_from_container(container: Any) -> list[dict]:

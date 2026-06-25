@@ -452,6 +452,9 @@ if "selected_account_index" not in st.session_state:
 if "dark_mode" not in st.session_state:
     st.session_state.dark_mode = False
 
+if "latest_graph_debug" not in st.session_state:
+    st.session_state.latest_graph_debug = None
+
 
 def _theme_values() -> dict[str, str]:
     if st.session_state.dark_mode:
@@ -1339,6 +1342,129 @@ def _sanitize_chat_markdown(content: str) -> str:
     return text.strip()
 
 
+def _build_fresh_graph_inputs(
+    *,
+    graph_messages: list,
+    user_query: str,
+    target_customer: dict | None,
+    explicit_customer_id: int | None,
+    customer_profile: dict | None,
+    customer_accounts: list[dict] | None,
+    graph_context: dict | None,
+) -> dict:
+    return {
+        "messages": graph_messages,
+        "user_query": user_query,
+        "next": "",
+        "member_id": str(target_customer.get("customer_id")) if target_customer else None,
+        "customer_id": target_customer.get("customer_id") if target_customer else explicit_customer_id,
+        "customer_profile": customer_profile,
+        "customer_accounts": customer_accounts,
+        "context": graph_context,
+        "plan": [],
+        "current_step": 0,
+        "current_agent": None,
+        "completed_agents": [],
+        "agent_outputs": {},
+        "products": [],
+        "product_candidates": [],
+        "searched_products": [],
+        "eligibility_results": [],
+        "financial_results": [],
+        "recommendation_results": [],
+        "customer_result": None,
+        "product_result": None,
+        "financial_result": None,
+        "eligibility_result": None,
+        "recommend_result": None,
+        "validation_result": None,
+        "validation_passed": None,
+        "revision_required": None,
+        "failure_type": None,
+        "missing_fields": [],
+        "blocking_issues": [],
+        "awaiting_user_input": False,
+        "validation_retry_count": 0,
+        "max_validation_retries": None,
+        "validation_retry_query": None,
+        "retry_start_agent": None,
+        "retry_reason": None,
+        "retry_history": [],
+        "last_validation_failed": None,
+        "draft_answer": None,
+        "final_answer": None,
+        "agent_logs": [],
+        "errors": [],
+    }
+
+
+def _build_graph_debug_summary(final_output: dict | None) -> dict | None:
+    if not isinstance(final_output, dict):
+        return None
+
+    def summarize_result(result_key: str) -> dict:
+        result = final_output.get(result_key) or {}
+        payload = result.get("result") if isinstance(result, dict) else {}
+        if not isinstance(payload, dict):
+            payload = {}
+        return {
+            "status": result.get("status") if isinstance(result, dict) else None,
+            "payload_status": payload.get("status"),
+            "fallback_reason": payload.get("fallback_reason"),
+            "error": result.get("error") if isinstance(result, dict) else None,
+            "summary": str(payload.get("summary") or result.get("summary") or "")[:240] if isinstance(result, dict) else "",
+        }
+
+    return {
+        "user_query": final_output.get("user_query"),
+        "task_type": final_output.get("task_type"),
+        "current_agent": final_output.get("current_agent"),
+        "current_step": final_output.get("current_step"),
+        "completed_agents": final_output.get("completed_agents") or [],
+        "counts": {
+            "product_candidates": len(final_output.get("product_candidates") or []),
+            "eligibility_results": len(final_output.get("eligibility_results") or []),
+            "financial_results": len(final_output.get("financial_results") or []),
+            "recommendation_results": len(final_output.get("recommendation_results") or []),
+        },
+        "results": {
+            "product_result": summarize_result("product_result"),
+            "eligibility_result": summarize_result("eligibility_result"),
+            "financial_result": summarize_result("financial_result"),
+            "recommend_result": summarize_result("recommend_result"),
+            "validation_result": summarize_result("validation_result"),
+        },
+        "errors": final_output.get("errors") or [],
+    }
+
+
+def _render_graph_debug_panel(debug_info: dict | None) -> None:
+    if not isinstance(debug_info, dict):
+        return
+
+    with st.expander("실행 디버그 보기", expanded=False):
+        meta_col_1, meta_col_2, meta_col_3, meta_col_4 = st.columns(4)
+        meta_col_1.metric("task_type", str(debug_info.get("task_type") or "-"))
+        meta_col_2.metric("current_step", str(debug_info.get("current_step") or "-"))
+        meta_col_3.metric("current_agent", str(debug_info.get("current_agent") or "-"))
+        meta_col_4.metric("completed_agents", str(len(debug_info.get("completed_agents") or [])))
+
+        counts = debug_info.get("counts") or {}
+        count_col_1, count_col_2, count_col_3, count_col_4 = st.columns(4)
+        count_col_1.metric("product_candidates", str(counts.get("product_candidates", 0)))
+        count_col_2.metric("eligibility_results", str(counts.get("eligibility_results", 0)))
+        count_col_3.metric("financial_results", str(counts.get("financial_results", 0)))
+        count_col_4.metric("recommendation_results", str(counts.get("recommendation_results", 0)))
+
+        for result_key, summary in (debug_info.get("results") or {}).items():
+            st.markdown(f"**{result_key}**")
+            st.json(summary)
+
+        if debug_info.get("errors"):
+            st.markdown("**errors**")
+            st.json(debug_info.get("errors"))
+
+
 def _run_assistant(prompt: str, assistant_slot) -> str:
     selected_customer = st.session_state.selected_customer
     explicit_customer_id = _extract_explicit_customer_id(prompt)
@@ -1378,19 +1504,15 @@ def _run_assistant(prompt: str, assistant_slot) -> str:
     langfuse_session_id = st.session_state.langfuse_session_id
     graph = st.session_state.graph
 
-    inputs = {
-        "messages": graph_messages,
-        "user_query": user_query,
-        "next": "",
-        "member_id": str(target_customer.get("customer_id")) if target_customer else None,
-        "customer_id": target_customer.get("customer_id") if target_customer else explicit_customer_id,
-        "customer_profile": customer_profile,
-        "customer_accounts": customer_accounts,
-        "context": graph_context,
-        "plan": [],
-        "current_step": 0,
-        "agent_outputs": {},
-    }
+    inputs = _build_fresh_graph_inputs(
+        graph_messages=graph_messages,
+        user_query=user_query,
+        target_customer=target_customer,
+        explicit_customer_id=explicit_customer_id,
+        customer_profile=customer_profile,
+        customer_accounts=customer_accounts,
+        graph_context=graph_context,
+    )
 
     q = queue.Queue()
 
@@ -1463,6 +1585,7 @@ def _run_assistant(prompt: str, assistant_slot) -> str:
                         if not ai_content and final_output:
                             ai_message = final_output["messages"][-1]
                             ai_content = ai_message.content if hasattr(ai_message, "content") else str(ai_message)
+                        st.session_state.latest_graph_debug = _build_graph_debug_summary(final_output)
 
                         ai_content = ai_content.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
                         
@@ -1478,6 +1601,10 @@ def _run_assistant(prompt: str, assistant_slot) -> str:
                 q.put({"type": "done", "content": ai_content})
 
             except Exception as e:
+                st.session_state.latest_graph_debug = {
+                    "user_query": user_query,
+                    "errors": [str(e)],
+                }
                 q.put({"type": "error", "content": str(e)})
 
         loop.run_until_complete(run_graph())
@@ -1912,3 +2039,5 @@ with chat_page:
 
     if prompt:
         _handle_prompt(prompt, chat_history)
+
+    _render_graph_debug_panel(st.session_state.latest_graph_debug)

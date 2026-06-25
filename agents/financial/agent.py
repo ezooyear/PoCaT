@@ -6,8 +6,10 @@ import re
 from datetime import date, datetime
 from typing import Any
 
+from langchain_core.messages import AIMessage
+
+from agents.base import make_agent_result, run_agent_loop, run_agent_loop_async
 from graph.state import AgentState
-from agents.base import run_agent_loop, run_agent_loop_async
 from agents.financial.prompts import FINANCIAL_SYSTEM_PROMPT
 from agents.financial.tools import FINANCIAL_TOOLS, compare_switch_benefit
 
@@ -20,25 +22,74 @@ DEFAULT_TAX_RATE = 0.154
 
 
 async def financial_agent_node(state: AgentState) -> dict:
-    result = await run_agent_loop_async(
-        state=state,
-        system_prompt=FINANCIAL_SYSTEM_PROMPT,
-        tools=FINANCIAL_TOOLS,
-        output_key="financial_agent",
-        result_key="financial_result", # 추가 : validation에서 활용
-        max_iterations=5,
+    try:
+        result = await run_agent_loop_async(
+            state=state,
+            system_prompt=FINANCIAL_SYSTEM_PROMPT,
+            tools=FINANCIAL_TOOLS,
+            output_key="financial_agent",
+            result_key="financial_result", # 추가 : validation에서 활용
+            max_iterations=5,
+        )
+
+        if state.get("task_type") == "switch_analysis":
+            result = _augment_switch_analysis_result(state, result)
+
+        if state.get("task_type") == "recommendation":
+            result = _augment_recommendation_financial_results(state, result)
+
+        result = _augment_maturity_estimate_result(state, result)
+        result = _ensure_financial_calculations(result)
+
+        return _enforce_financial_role_boundary(result)
+    except Exception as error:
+        return _build_financial_exception_fallback(state, str(error))
+
+
+def _build_financial_exception_fallback(state: AgentState, error_message: str) -> dict[str, Any]:
+    fallback_result = make_agent_result(
+        status="failed",
+        result={
+            "status": "failed",
+            "summary": "금융 계산 처리 중 오류가 발생하여 결과를 안전한 fallback 상태로 반환합니다.",
+            "calculations": [],
+            "financial_results": [],
+            "tool_results": [],
+            "fallback_reason": "exception_in_financial_agent",
+            "required_next_steps": ["financial_agent 예외 로그 확인"],
+            "agent_name": "financial_agent",
+            "current_step": (state.get("current_step") or 0) + 1,
+            "result_key": "financial_result",
+            "source_agent": "financial_agent",
+        },
+        evidence=[],
+        error=error_message,
     )
 
-    if state.get("task_type") == "switch_analysis":
-        result = _augment_switch_analysis_result(state, result)
+    agent_outputs = dict(state.get("agent_outputs") or {})
+    agent_outputs["financial_agent"] = fallback_result
 
-    if state.get("task_type") == "recommendation":
-        result = _augment_recommendation_financial_results(state, result)
+    completed_agents = list(state.get("completed_agents") or [])
+    if "financial_agent" not in completed_agents:
+        completed_agents.append("financial_agent")
 
-    result = _augment_maturity_estimate_result(state, result)
-    result = _ensure_financial_calculations(result)
+    errors = list(state.get("errors") or [])
+    errors.append({"agent": "financial_agent", "error": error_message})
 
-    return _enforce_financial_role_boundary(result)
+    return {
+        "messages": [AIMessage(content=fallback_result["result"]["summary"])],
+        "agent_outputs": agent_outputs,
+        "current_step": (state.get("current_step") or 0) + 1,
+        "current_agent": "financial_agent",
+        "completed_agents": completed_agents,
+        "financial_results": [],
+        "financial_result": fallback_result,
+        "errors": errors,
+        "context": {
+            **(state.get("context") or {}),
+            "financial_prompt": FINANCIAL_SYSTEM_PROMPT,
+        },
+    }
 
 
 def _augment_maturity_estimate_result(state: AgentState, result: dict) -> dict:
