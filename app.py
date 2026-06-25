@@ -452,9 +452,6 @@ if "selected_account_index" not in st.session_state:
 if "dark_mode" not in st.session_state:
     st.session_state.dark_mode = False
 
-if "latest_graph_debug" not in st.session_state:
-    st.session_state.latest_graph_debug = None
-
 
 def _theme_values() -> dict[str, str]:
     if st.session_state.dark_mode:
@@ -1585,8 +1582,6 @@ def _run_assistant(prompt: str, assistant_slot) -> str:
                         if not ai_content and final_output:
                             ai_message = final_output["messages"][-1]
                             ai_content = ai_message.content if hasattr(ai_message, "content") else str(ai_message)
-                        st.session_state.latest_graph_debug = _build_graph_debug_summary(final_output)
-
                         ai_content = ai_content.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
                         
                         if observation is not None:
@@ -1601,10 +1596,6 @@ def _run_assistant(prompt: str, assistant_slot) -> str:
                 q.put({"type": "done", "content": ai_content})
 
             except Exception as e:
-                st.session_state.latest_graph_debug = {
-                    "user_query": user_query,
-                    "errors": [str(e)],
-                }
                 q.put({"type": "error", "content": str(e)})
 
         loop.run_until_complete(run_graph())
@@ -2039,5 +2030,3 @@ with chat_page:
 
     if prompt:
         _handle_prompt(prompt, chat_history)
-
-    _render_graph_debug_panel(st.session_state.latest_graph_debug)
