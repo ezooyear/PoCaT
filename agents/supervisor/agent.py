@@ -185,7 +185,9 @@ async def _synthesize_mode_async(state: AgentState, config: RunnableConfig = Non
     final_context = _build_final_context(state, user_query)
     # 추가: Validation 실패 시 LLM 최종 합성 전에 확정 추천을 차단합니다.
     if _is_validation_failed(final_context.get("validation_result")):
-        final_answer = _build_validation_blocked_answer(final_context)
+        final_answer = _sanitize_user_facing_final_answer(
+            _build_validation_blocked_answer(final_context)
+        )
 
         return {
             "messages": [AIMessage(content=final_answer)],
@@ -217,10 +219,12 @@ async def _synthesize_mode_async(state: AgentState, config: RunnableConfig = Non
         async for chunk in llm.astream(messages, config=config):
             if chunk.content:
                 full_content += chunk.content
-        final_answer = _clean_text(full_content)
+        final_answer = _sanitize_user_facing_final_answer(_clean_text(full_content))
 
     except Exception as e:
-        final_answer = _fallback_final_answer(final_context, error=e)
+        final_answer = _sanitize_user_facing_final_answer(
+            _fallback_final_answer(final_context, error=e)
+        )
 
     return {
         "messages": [AIMessage(content=final_answer)],
@@ -828,6 +832,14 @@ def _format_agent_results(final_context: dict) -> str:
     구조화된 state 결과를 LLM이 읽기 쉬운 텍스트로 변환한다.
     """
 
+    lines = []
+
+    ordered_recommendation_section = _build_ordered_recommendation_section(final_context)
+    if ordered_recommendation_section:
+        lines.append("## 추천 순서 고정 데이터")
+        lines.append(ordered_recommendation_section)
+        lines.append("")
+
     label_map = {
         "user_query": "사용자 질문",
         "task_type": "작업 유형",
@@ -845,8 +857,6 @@ def _format_agent_results(final_context: dict) -> str:
         "errors": "오류 목록",
     }
 
-    lines = []
-
     for key, label in label_map.items():
         value = final_context.get(key)
 
@@ -861,6 +871,65 @@ def _format_agent_results(final_context: dict) -> str:
         return "사용 가능한 분석 결과가 없습니다."
 
     return "\n".join(lines)
+
+
+def _get_recommendation_payload(recommend_result: Any) -> dict[str, Any]:
+    if not isinstance(recommend_result, dict):
+        return {}
+
+    payload = recommend_result.get("result")
+    if isinstance(payload, dict):
+        return payload
+
+    return recommend_result
+
+
+def _build_ordered_recommendation_section(final_context: dict) -> str:
+    recommend_payload = _get_recommendation_payload(final_context.get("recommend_result"))
+    recommendations = recommend_payload.get("recommendations") or recommend_payload.get("recommended_products") or []
+
+    if not isinstance(recommendations, list) or not recommendations:
+        return ""
+
+    ordered_recommendations = []
+    for index, item in enumerate(recommendations, start=1):
+        if not isinstance(item, dict):
+            continue
+
+        ordered_recommendations.append(
+            {
+                "fixed_rank": item.get("rank") or index,
+                "product_name": item.get("product_name"),
+                "payment_plan_text": item.get("payment_plan_text"),
+                "estimated_interest_after_tax": item.get("estimated_interest_after_tax"),
+                "estimated_maturity_amount": item.get("estimated_maturity_amount"),
+                "reason": item.get("reason"),
+                "recommendation_status": item.get("recommendation_status"),
+            }
+        )
+
+    if not ordered_recommendations:
+        return ""
+
+    excluded_products = recommend_payload.get("excluded_products") or []
+    additional_check_products = []
+    for item in excluded_products:
+        if not isinstance(item, dict):
+            continue
+        additional_check_products.append(
+            {
+                "product_name": item.get("product_name"),
+                "status": item.get("status"),
+                "reason": item.get("reason"),
+            }
+        )
+
+    fixed_order_payload = {
+        "instruction": "Use ordered_recommendations exactly as provided. Do not reorder or promote additional_check_products above them.",
+        "ordered_recommendations": ordered_recommendations,
+        "additional_check_products": additional_check_products,
+    }
+    return _safe_json_dumps(fixed_order_payload)
 
 def _build_recommendation_fallback_answer(final_context: dict) -> str | None:
     """
@@ -932,7 +1001,7 @@ def _fallback_final_answer(final_context: dict, error: Exception | None = None) 
 
     recommendation_answer = _build_recommendation_fallback_answer(final_context)
     if recommendation_answer:
-        return recommendation_answer
+        return _sanitize_user_facing_final_answer(recommendation_answer)
 
     lines = [
         "요청하신 내용을 기준으로 확인한 결과를 정리해드릴게요.",
@@ -967,7 +1036,57 @@ def _fallback_final_answer(final_context: dict, error: Exception | None = None) 
     lines.append("")
     lines.append("실제 적용 금리와 가입 가능 여부는 거래 시점, 고객 조건, 은행 정책에 따라 달라질 수 있으니 최종 내용은 상품설명서 또는 은행 상담을 통해 확인하는 것이 좋습니다.")
 
-    return "\n".join(lines)
+    return _sanitize_user_facing_final_answer("\n".join(lines))
+
+
+def _sanitize_user_facing_final_answer(text: str) -> str:
+    sanitized = str(text or "")
+
+    generic_replacements = {
+        "금리정보가 부족하여 계산하지 못했습니다.": "예상 이자 계산이 제공되지 않습니다.",
+        "예상 이자 계산 결과가 없어 금액 기준 추천을 보류했습니다.": "현재 조건에서 바로 비교 가능한 상품만 우선 안내드립니다.",
+        "상품설명서를 확인하세요.": "",
+        "상품설명서 또는 은행 상담을 통해 확인하는 것이 좋습니다.": "",
+        "수익 계산을 보류한 상태입니다.": "예상 이자 계산이 제공되지 않습니다.",
+    }
+
+    for source, target in generic_replacements.items():
+        sanitized = sanitized.replace(source, target)
+
+    sanitized = sanitized.replace("financial_results_missing", "")
+    sanitized = sanitized.replace("missing_required_calculation_fields", "")
+    sanitized = sanitized.replace("exception_in_financial_agent", "")
+
+    internal_intro_markers = (
+        "일부 상품의 금융 계산이 누락",
+        "금융 계산이 누락",
+        "일부 상품은 현재 기준으로 상세 계산이 제공되지 않아 안내 범위를 조정했습니다.",
+        "가입 대상 조건이 고객 정보와 일치하지 않을 수 있습니다.",
+        "직업군인용의 가입 대상 조건이",
+        "validation",
+        "fallback",
+        "needs_check",
+        "failed",
+    )
+    natural_intro = "고객님의 월 저축 가능액과 가입 가능 조건을 기준으로 추천 상품을 정리해 드립니다."
+
+    stripped = sanitized.lstrip()
+    if stripped.startswith(internal_intro_markers):
+        sanitized = f"{natural_intro}\n\n{sanitized}"
+
+    sanitized = sanitized.replace(
+        "가입 대상 조건이 고객 정보와 일치하지 않을 수 있습니다.",
+        "가입 대상 조건은 추가 확인이 필요합니다.",
+    )
+    sanitized = sanitized.replace(
+        "직업군인용의 가입 대상 조건이 고객 정보와 일치하지 않을 수 있습니다.",
+        "직업군인 여부 추가 확인이 필요합니다.",
+    )
+
+    while "\n\n\n" in sanitized:
+        sanitized = sanitized.replace("\n\n\n", "\n\n")
+
+    return sanitized.strip()
 
 
 def _parse_plan_from_text(text: str) -> dict:

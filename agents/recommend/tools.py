@@ -327,6 +327,9 @@ def _format_payment_basis(item: dict) -> str:
 def _soften_needs_check_reason(reason: str) -> str:
     text = str(reason or "")
 
+    if "고객 직업이" in text and "직업군인" in text:
+        return "직업군인 여부 추가 확인이 필요해 이번에는 확정 추천에 포함하지 않았습니다."
+
     if "상품 가입조건을 충분히 확인할 수 없어" in text:
         return "가입 대상이나 세부 조건이 더 확인되어야 해서, 이번에는 확정 추천에는 넣지 않았습니다."
 
@@ -340,10 +343,10 @@ def _soften_rejected_reason(reason: str) -> str:
     text = str(reason or "")
 
     if "직업군인 전용 상품 가입 대상이 아닙니다" in text:
-        return "직업군인 전용 상품으로 확인되어, 현재 고객님의 직업 조건과 맞지 않아 추천에서 제외했습니다."
+        return "직업군인 여부 추가 확인이 필요해 이번 추천에서는 제외했습니다."
 
     if "고객 직업이" in text and "직업군인" in text:
-        return "현재 고객님의 직업 조건과 맞지 않아 추천에서 제외했습니다."
+        return "직업군인 여부 추가 확인이 필요해 이번 추천에서는 제외했습니다."
 
     return _sanitize_cell(text)
 

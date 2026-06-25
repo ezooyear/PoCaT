@@ -540,11 +540,11 @@ def _build_guarded_recommendation_summary(
     elif fallback_reason == "product_candidates_missing":
         lines.append("- 비교할 상품 후보를 찾지 못해 추천을 잠시 보류했습니다.")
     elif fallback_reason == "financial_results_missing":
-        lines.append("- 예상 이자 계산 결과가 없어 금액 기준 추천을 보류했습니다.")
+        lines.append("- 현재 조건에서 바로 비교 가능한 상품만 우선 정리했습니다.")
     elif fallback_reason in {"no_eligible_product", "no_valid_eligible_product"}:
         pass
     elif fallback_reason:
-        lines.append(f"- 추가 확인 사유: {fallback_reason}")
+        lines.append("- 일부 상품은 이번 안내에서 제외되었습니다.")
 
     if excluded_products:
         lines.append("")
