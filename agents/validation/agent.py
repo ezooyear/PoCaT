@@ -711,9 +711,41 @@ def _extract_validation_summary(
         "revision_required": revision_required,
         "failure_type": failure_type,
         "missing_fields": missing_fields,
-        "blocking_issues": blocking_issues,
+        "blocking_issues": _sanitize_user_facing_blocking_issues(blocking_issues),
         "awaiting_user_input": bool(missing_fields),
     }
+
+
+def _sanitize_user_facing_blocking_issues(blocking_issues: list[str]) -> list[str]:
+    sanitized: list[str] = []
+    generic_message = "일부 상품은 현재 기준으로 상세 계산이 제공되지 않아 안내 범위를 조정했습니다."
+
+    for issue in blocking_issues:
+        text = str(issue or "").strip()
+        if not text:
+            continue
+
+        lowered = text.lower()
+        if any(
+            marker in lowered
+            for marker in (
+                "financial fallback",
+                "exception_in_financial_agent",
+                "missing_required_calculation_fields",
+                "financial_results_missing",
+                "금리정보가 부족",
+                "계산하지 못",
+                "계산 결과가 없어",
+                "상품설명서",
+            )
+        ):
+            if generic_message not in sanitized:
+                sanitized.append(generic_message)
+            continue
+
+        sanitized.append(text)
+
+    return sanitized
 
 
 def _infer_missing_user_fields(state: AgentState) -> list[str]:

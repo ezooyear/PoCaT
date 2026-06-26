@@ -2,10 +2,14 @@
 Shared agent execution utilities.
 """
 
+import asyncio
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any, Optional
 
 from langchain_core.messages import SystemMessage, ToolMessage
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config.settings import get_llm
 from graph.state import AgentState
@@ -16,6 +20,57 @@ from observability.langfuse import (
     summarize_for_langfuse,
     update_observation,
 )
+
+LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "20"))
+LLM_MAX_RETRIES = max(1, int(os.getenv("LLM_MAX_RETRIES", "3")))
+LLM_RETRY_MULTIPLIER = float(os.getenv("LLM_RETRY_MULTIPLIER", "1"))
+
+
+class LLMInvocationTimeoutError(TimeoutError):
+    """Raised when an LLM call exceeds the configured timeout."""
+
+
+def _build_llm_retry_kwargs() -> dict[str, Any]:
+    return {
+        "stop": stop_after_attempt(LLM_MAX_RETRIES),
+        "wait": wait_exponential(
+            multiplier=LLM_RETRY_MULTIPLIER,
+            min=LLM_RETRY_MULTIPLIER,
+            max=max(LLM_RETRY_MULTIPLIER * 4, LLM_RETRY_MULTIPLIER),
+        ),
+        "reraise": True,
+    }
+
+
+async def _ainvoke_with_retry(llm: Any, messages: list[Any]) -> Any:
+    @retry(**_build_llm_retry_kwargs())
+    async def _call() -> Any:
+        try:
+            return await asyncio.wait_for(
+                llm.ainvoke(messages),
+                timeout=LLM_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as error:
+            raise LLMInvocationTimeoutError(
+                f"LLM ainvoke timeout after {LLM_TIMEOUT_SECONDS} seconds"
+            ) from error
+
+    return await _call()
+
+
+def _invoke_with_retry(llm: Any, messages: list[Any]) -> Any:
+    @retry(**_build_llm_retry_kwargs())
+    def _call() -> Any:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(llm.invoke, messages)
+            try:
+                return future.result(timeout=LLM_TIMEOUT_SECONDS)
+            except FuturesTimeoutError as error:
+                raise LLMInvocationTimeoutError(
+                    f"LLM invoke timeout after {LLM_TIMEOUT_SECONDS} seconds"
+                ) from error
+
+    return _call()
 
 
 def make_agent_result(
@@ -193,6 +248,35 @@ def build_agent_trace_output(
     return payload
 
 
+def _to_float_or_none(value: Any) -> float | None:
+    if value in (None, "", []):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_tool_args(tool_name: str, tool_args: Any) -> Any:
+    if tool_name != "calculate_interest" or not isinstance(tool_args, dict):
+        return tool_args
+
+    normalized_args = dict(tool_args)
+    principal = _to_float_or_none(normalized_args.get("principal"))
+    if principal is not None and principal > 0:
+        return normalized_args
+
+    monthly_payment = _to_float_or_none(normalized_args.get("monthly_payment")) or 0.0
+    months = _to_float_or_none(normalized_args.get("months")) or 0.0
+
+    if monthly_payment > 0 and months > 0:
+        normalized_args["principal"] = monthly_payment * months
+        return normalized_args
+
+    normalized_args["principal"] = principal or 0.0
+    return normalized_args
+
+
 async def run_agent_loop_async(
     state: AgentState,
     system_prompt: str,
@@ -238,7 +322,7 @@ async def run_agent_loop_async(
             messages = [SystemMessage(content=prompt)] + list(state.get("messages") or [])
 
             for _ in range(max_iterations):
-                response = await llm_with_tools.ainvoke(messages)
+                response = await _ainvoke_with_retry(llm_with_tools, messages)
                 messages.append(response)
 
                 if not response.tool_calls:
@@ -248,7 +332,7 @@ async def run_agent_loop_async(
 
                 for tool_call in response.tool_calls:
                     tool_name = tool_call["name"]
-                    tool_args = tool_call["args"]
+                    tool_args = _normalize_tool_args(tool_name, tool_call["args"])
 
                     try:
                         if tool_name in tool_map:
@@ -274,7 +358,7 @@ async def run_agent_loop_async(
                         )
                     )
             else:
-                response = await llm.ainvoke(messages)
+                response = await _ainvoke_with_retry(llm, messages)
 
             summary = response.content if response else ""
             status = "failed" if tool_errors else "success"
@@ -383,7 +467,7 @@ def run_agent_loop(
             messages = [SystemMessage(content=prompt)] + list(state.get("messages") or [])
 
             for _ in range(max_iterations):
-                response = llm_with_tools.invoke(messages)
+                response = _invoke_with_retry(llm_with_tools, messages)
                 messages.append(response)
 
                 if not response.tool_calls:
@@ -393,7 +477,7 @@ def run_agent_loop(
 
                 for tool_call in response.tool_calls:
                     tool_name = tool_call["name"]
-                    tool_args = tool_call["args"]
+                    tool_args = _normalize_tool_args(tool_name, tool_call["args"])
 
                     try:
                         if tool_name in tool_map:
@@ -419,7 +503,7 @@ def run_agent_loop(
                         )
                     )
             else:
-                response = llm.invoke(messages)
+                response = _invoke_with_retry(llm, messages)
 
             summary = response.content if response else ""
             status = "failed" if tool_errors else "success"

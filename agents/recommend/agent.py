@@ -298,20 +298,50 @@ def _load_product_candidates(state: AgentState, agent_outputs: dict) -> list[dic
 def _load_financial_results(state: AgentState, agent_outputs: dict) -> list[dict]:
     financial_results = state.get("financial_results")
     if isinstance(financial_results, list) and financial_results:
-        return financial_results
+        return _filter_usable_financial_results(financial_results)
 
     financial_path = get_financial_calculations(state)
     if isinstance(financial_path.get("data"), list) and financial_path.get("data"):
-        return financial_path["data"]
+        return _filter_usable_financial_results(financial_path["data"])
 
     financial_result = state.get("financial_result")
     if financial_result:
         extracted = _extract_financial_results_from_container(financial_result)
         if extracted:
-            return extracted
+            return _filter_usable_financial_results(extracted)
 
     financial_agent_output = agent_outputs.get("financial_agent", "")
-    return _extract_financial_results_from_container(financial_agent_output)
+    return _filter_usable_financial_results(_extract_financial_results_from_container(financial_agent_output))
+
+
+def _filter_usable_financial_results(financial_results: list[dict]) -> list[dict]:
+    usable_results: list[dict] = []
+
+    for item in financial_results:
+        if not isinstance(item, dict):
+            continue
+
+        status = str(item.get("status") or "").strip().lower()
+        if status in {"needs_check", "failed", "error"}:
+            continue
+
+        has_amounts = any(
+            item.get(key) not in (None, "", [])
+            for key in (
+                "estimated_interest",
+                "estimated_interest_after_tax",
+                "estimated_maturity_amount",
+                "maturity_amount",
+                "total_principal",
+                "principal",
+            )
+        )
+        if not has_amounts:
+            continue
+
+        usable_results.append(dict(item))
+
+    return usable_results
 
 
 def _extract_financial_results_from_container(container: Any) -> list[dict]:
@@ -510,11 +540,11 @@ def _build_guarded_recommendation_summary(
     elif fallback_reason == "product_candidates_missing":
         lines.append("- 비교할 상품 후보를 찾지 못해 추천을 잠시 보류했습니다.")
     elif fallback_reason == "financial_results_missing":
-        lines.append("- 예상 이자 계산 결과가 없어 금액 기준 추천을 보류했습니다.")
+        lines.append("- 현재 조건에서 바로 비교 가능한 상품만 우선 정리했습니다.")
     elif fallback_reason in {"no_eligible_product", "no_valid_eligible_product"}:
         pass
     elif fallback_reason:
-        lines.append(f"- 추가 확인 사유: {fallback_reason}")
+        lines.append("- 일부 상품은 이번 안내에서 제외되었습니다.")
 
     if excluded_products:
         lines.append("")
