@@ -117,7 +117,10 @@ pip install -r requirements.txt
 OPENROUTER_API_KEY=your_openrouter_api_key
 
 # 사용할 LLM 모델
-LLM_MODEL=openai/gpt-oss-120b:free
+LLM_MODEL=openai/gpt-4.1-nano
+
+# 무료 모델 테스트 시 아래 값으로 변경
+# LLM_MODEL=google/gemini-2.5-flash
 
 # PostgreSQL DB 접속 정보
 DB_HOST=localhost
