@@ -14,7 +14,9 @@ import time
 from dotenv import load_dotenv
 import streamlit as st
 
-load_dotenv()
+load_dotenv(override=False)
+
+from config.settings import log_llm_configuration
 
 from db.postgres_db import get_connection
 from graph.builder import build_graph
@@ -26,6 +28,8 @@ from observability.langfuse import (
 
 
 PDF_DIR = Path(__file__).resolve().parent / "data" / "pdfs"
+
+log_llm_configuration("APP START")
 
 
 st.set_page_config(

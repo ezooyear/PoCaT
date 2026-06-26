@@ -11,7 +11,7 @@ from typing import Any, Optional
 from langchain_core.messages import SystemMessage, ToolMessage
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from config.settings import get_llm
+from config.settings import get_llm, get_resolved_llm_model
 from graph.state import AgentState
 from observability.langfuse import (
     flush_langfuse,
@@ -30,6 +30,13 @@ class LLMInvocationTimeoutError(TimeoutError):
     """Raised when an LLM call exceeds the configured timeout."""
 
 
+def _log_llm_resolution(agent_name: str, resolved_model: str, max_retries: int | None) -> None:
+    print(
+        f"[LLM DEBUG] agent={agent_name} resolved_model={resolved_model} "
+        f"timeout={LLM_TIMEOUT_SECONDS}s retries={max_retries if max_retries is not None else LLM_MAX_RETRIES}"
+    )
+
+
 def _build_llm_retry_kwargs() -> dict[str, Any]:
     return {
         "stop": stop_after_attempt(LLM_MAX_RETRIES),
@@ -42,8 +49,17 @@ def _build_llm_retry_kwargs() -> dict[str, Any]:
     }
 
 
-async def _ainvoke_with_retry(llm: Any, messages: list[Any]) -> Any:
-    @retry(**_build_llm_retry_kwargs())
+async def _ainvoke_with_retry(
+    llm: Any,
+    messages: list[Any],
+    *,
+    max_retries: int | None = None,
+) -> Any:
+    retry_kwargs = _build_llm_retry_kwargs()
+    if max_retries is not None:
+        retry_kwargs["stop"] = stop_after_attempt(max(1, int(max_retries)))
+
+    @retry(**retry_kwargs)
     async def _call() -> Any:
         try:
             return await asyncio.wait_for(
@@ -58,8 +74,17 @@ async def _ainvoke_with_retry(llm: Any, messages: list[Any]) -> Any:
     return await _call()
 
 
-def _invoke_with_retry(llm: Any, messages: list[Any]) -> Any:
-    @retry(**_build_llm_retry_kwargs())
+def _invoke_with_retry(
+    llm: Any,
+    messages: list[Any],
+    *,
+    max_retries: int | None = None,
+) -> Any:
+    retry_kwargs = _build_llm_retry_kwargs()
+    if max_retries is not None:
+        retry_kwargs["stop"] = stop_after_attempt(max(1, int(max_retries)))
+
+    @retry(**retry_kwargs)
     def _call() -> Any:
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(llm.invoke, messages)
@@ -288,6 +313,7 @@ async def run_agent_loop_async(
     prev_context_labels: Optional[dict] = None,
     prev_context_suffix: str = "",
     span_name: Optional[str] = None,
+    llm_max_retries: Optional[int] = None,
 ) -> dict:
     structured_result: dict[str, Any] | None = None
     tool_results: list[dict[str, Any]] = []
@@ -295,6 +321,8 @@ async def run_agent_loop_async(
     response = None
 
     try:
+        resolved_model = get_resolved_llm_model()
+        _log_llm_resolution(output_key, resolved_model, llm_max_retries)
         with langfuse_observation(
             name=span_name or output_key,
             as_type="span",
@@ -304,7 +332,7 @@ async def run_agent_loop_async(
                 result_key=result_key,
                 max_iterations=max_iterations,
             ),
-            metadata={"agent": output_key},
+            metadata={"agent": output_key, "resolved_model": resolved_model},
         ) as observation:
             llm = get_llm()
             llm_with_tools = llm.bind_tools(tools)
@@ -322,7 +350,11 @@ async def run_agent_loop_async(
             messages = [SystemMessage(content=prompt)] + list(state.get("messages") or [])
 
             for _ in range(max_iterations):
-                response = await _ainvoke_with_retry(llm_with_tools, messages)
+                response = await _ainvoke_with_retry(
+                    llm_with_tools,
+                    messages,
+                    max_retries=llm_max_retries,
+                )
                 messages.append(response)
 
                 if not response.tool_calls:
@@ -358,7 +390,11 @@ async def run_agent_loop_async(
                         )
                     )
             else:
-                response = await _ainvoke_with_retry(llm, messages)
+                response = await _ainvoke_with_retry(
+                    llm,
+                    messages,
+                    max_retries=llm_max_retries,
+                )
 
             summary = response.content if response else ""
             status = "failed" if tool_errors else "success"
@@ -391,6 +427,7 @@ async def run_agent_loop_async(
                     "agent": output_key,
                     "status": status,
                     "has_tool_errors": bool(tool_errors),
+                    "resolved_model": resolved_model,
                 },
             )
     finally:
@@ -433,6 +470,7 @@ def run_agent_loop(
     prev_context_labels: Optional[dict] = None,
     prev_context_suffix: str = "",
     span_name: Optional[str] = None,
+    llm_max_retries: Optional[int] = None,
 ) -> dict:
     structured_result: dict[str, Any] | None = None
     tool_results: list[dict[str, Any]] = []
@@ -440,6 +478,8 @@ def run_agent_loop(
     response = None
 
     try:
+        resolved_model = get_resolved_llm_model()
+        _log_llm_resolution(output_key, resolved_model, llm_max_retries)
         with langfuse_observation(
             name=span_name or output_key,
             as_type="span",
@@ -449,7 +489,7 @@ def run_agent_loop(
                 result_key=result_key,
                 max_iterations=max_iterations,
             ),
-            metadata={"agent": output_key},
+            metadata={"agent": output_key, "resolved_model": resolved_model},
         ) as observation:
             llm = get_llm()
             llm_with_tools = llm.bind_tools(tools)
@@ -467,7 +507,11 @@ def run_agent_loop(
             messages = [SystemMessage(content=prompt)] + list(state.get("messages") or [])
 
             for _ in range(max_iterations):
-                response = _invoke_with_retry(llm_with_tools, messages)
+                response = _invoke_with_retry(
+                    llm_with_tools,
+                    messages,
+                    max_retries=llm_max_retries,
+                )
                 messages.append(response)
 
                 if not response.tool_calls:
@@ -503,7 +547,11 @@ def run_agent_loop(
                         )
                     )
             else:
-                response = _invoke_with_retry(llm, messages)
+                response = _invoke_with_retry(
+                    llm,
+                    messages,
+                    max_retries=llm_max_retries,
+                )
 
             summary = response.content if response else ""
             status = "failed" if tool_errors else "success"
@@ -536,6 +584,7 @@ def run_agent_loop(
                     "agent": output_key,
                     "status": status,
                     "has_tool_errors": bool(tool_errors),
+                    "resolved_model": resolved_model,
                 },
             )
     finally:

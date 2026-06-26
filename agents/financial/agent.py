@@ -8,10 +8,19 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
-from agents.base import make_agent_result, run_agent_loop, run_agent_loop_async
+from agents.base import (
+    LLMInvocationTimeoutError,
+    build_agent_trace_input,
+    build_agent_trace_output,
+    make_agent_result,
+    run_agent_loop,
+    run_agent_loop_async,
+)
+from config.settings import get_resolved_llm_model
 from graph.state import AgentState
 from agents.financial.prompts import FINANCIAL_SYSTEM_PROMPT
 from agents.financial.tools import FINANCIAL_TOOLS, compare_switch_benefit
+from observability.langfuse import flush_langfuse, langfuse_observation, update_observation
 
 try:
     from agents.product.tools import get_product_detail_map
@@ -22,28 +31,236 @@ DEFAULT_TAX_RATE = 0.154
 
 
 async def financial_agent_node(state: AgentState) -> dict:
+    resolved_model = get_resolved_llm_model()
+    llm_error: Exception | None = None
+
     try:
-        result = await run_agent_loop_async(
-            state=state,
-            system_prompt=FINANCIAL_SYSTEM_PROMPT,
-            tools=FINANCIAL_TOOLS,
-            output_key="financial_agent",
-            result_key="financial_result", # 추가 : validation에서 활용
-            max_iterations=5,
+        print(f"[FINANCIAL DEBUG] resolved_model={resolved_model} current_step={(state.get('current_step') or 0) + 1}")
+        with langfuse_observation(
+            name="financial_agent",
+            as_type="span",
+            input=build_agent_trace_input(
+                state,
+                agent_name="financial_agent",
+                result_key="financial_result",
+                max_iterations=5,
+            ),
+            metadata={"agent": "financial_agent", "resolved_model": resolved_model},
+        ) as observation:
+            try:
+                result = await run_agent_loop_async(
+                    state=state,
+                    system_prompt=FINANCIAL_SYSTEM_PROMPT,
+                    tools=FINANCIAL_TOOLS,
+                    output_key="financial_agent",
+                    result_key="financial_result",
+                    max_iterations=5,
+                    llm_max_retries=2,
+                    span_name="financial_agent_llm",
+                )
+            except LLMInvocationTimeoutError as error:
+                llm_error = error
+                result = _build_rule_based_financial_fallback(state, str(error))
+            except Exception as error:
+                llm_error = error
+                result = _build_rule_based_financial_fallback(state, str(error))
+
+            if _should_use_financial_rule_fallback(result):
+                recovered_error = _extract_financial_error_message(result)
+                if recovered_error and llm_error is None:
+                    llm_error = RuntimeError(recovered_error)
+                result = _build_rule_based_financial_fallback(
+                    state,
+                    error_message=recovered_error,
+                )
+
+            if state.get("task_type") == "switch_analysis":
+                result = _augment_switch_analysis_result(state, result)
+
+            if state.get("task_type") == "recommendation":
+                result = _augment_recommendation_financial_results(state, result)
+
+            result = _augment_maturity_estimate_result(state, result)
+            result = _ensure_financial_calculations(result)
+            result = _enforce_financial_role_boundary(result)
+
+            _update_financial_agent_observation(
+                observation,
+                state=state,
+                result=result,
+                resolved_model=resolved_model,
+                llm_error=llm_error,
+            )
+            return result
+    finally:
+        flush_langfuse()
+
+
+def _should_use_financial_rule_fallback(result: dict[str, Any]) -> bool:
+    financial_result = result.get("financial_result")
+    if not isinstance(financial_result, dict):
+        return True
+
+    status = str(financial_result.get("status") or "").strip().lower()
+    if status == "failed":
+        return True
+
+    payload = financial_result.get("result")
+    if not isinstance(payload, dict):
+        return True
+
+    return str(payload.get("status") or "").strip().lower() == "failed"
+
+
+def _extract_financial_error_message(result: dict[str, Any]) -> str | None:
+    financial_result = result.get("financial_result")
+    if isinstance(financial_result, dict) and financial_result.get("error"):
+        return str(financial_result.get("error"))
+    return None
+
+
+def _extract_financial_result_payload(result: dict[str, Any]) -> dict[str, Any]:
+    financial_result = result.get("financial_result")
+    if not isinstance(financial_result, dict):
+        return {}
+
+    payload = financial_result.get("result")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _extract_financial_results_list(result: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = _extract_financial_result_payload(result)
+    for key in ("financial_results", "calculations"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+
+    raw = result.get("financial_results")
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    return []
+
+
+def _is_successful_financial_fallback(result: dict[str, Any]) -> bool:
+    payload = _extract_financial_result_payload(result)
+    financial_result = result.get("financial_result")
+    top_level_status = str((financial_result or {}).get("status") or "").strip().lower()
+    payload_status = str(payload.get("status") or "").strip().lower()
+    financial_results = _extract_financial_results_list(result)
+    has_calculated = any(
+        str(item.get("status") or "").strip().lower() == "calculated"
+        for item in financial_results
+    )
+    return (
+        payload_status == "fallback_success"
+        and top_level_status in {"success", "fallback_success"}
+        and has_calculated
+    )
+
+
+def _update_financial_agent_observation(
+    observation: Any,
+    *,
+    state: AgentState,
+    result: dict[str, Any],
+    resolved_model: str,
+    llm_error: Exception | None,
+) -> None:
+    if observation is None:
+        return
+
+    payload = _extract_financial_result_payload(result)
+    financial_result = result.get("financial_result") if isinstance(result.get("financial_result"), dict) else {}
+    financial_results = _extract_financial_results_list(result)
+    fallback_used = bool(payload.get("fallback_applied")) or llm_error is not None
+    fallback_success = _is_successful_financial_fallback(result)
+    financial_results_count = len(financial_results)
+    metadata = {
+        "agent": "financial_agent",
+        "resolved_model": resolved_model,
+        "status": payload.get("status") or financial_result.get("status"),
+        "llm_error_type": type(llm_error).__name__ if llm_error else None,
+        "llm_error_message": str(llm_error) if llm_error else None,
+        "fallback_used": fallback_used,
+        "fallback_success": fallback_success,
+        "financial_results_count": financial_results_count,
+    }
+    output = build_agent_trace_output(
+        financial_result if isinstance(financial_result, dict) else result,
+        agent_name="financial_agent",
+        state=state,
+        result_key="financial_result",
+        extra_output={
+            "financial_results_count": financial_results_count,
+            "fallback_used": fallback_used,
+            "fallback_success": fallback_success,
+        },
+    )
+
+    try:
+        observation.update(
+            output=output,
+            metadata=metadata,
+            level="ERROR" if fallback_used and not fallback_success else "DEFAULT",
+            status_message=(
+                "financial_fallback_failed"
+                if fallback_used and not fallback_success
+                else "financial_fallback_success"
+                if fallback_success
+                else "financial_success"
+            ),
         )
+        return
+    except Exception:
+        pass
 
-        if state.get("task_type") == "switch_analysis":
-            result = _augment_switch_analysis_result(state, result)
+    update_observation(
+        observation,
+        output=output,
+        metadata=metadata,
+    )
 
-        if state.get("task_type") == "recommendation":
-            result = _augment_recommendation_financial_results(state, result)
 
-        result = _augment_maturity_estimate_result(state, result)
-        result = _ensure_financial_calculations(result)
+def _build_rule_based_financial_fallback(
+    state: AgentState,
+    error_message: str | None = None,
+) -> dict[str, Any]:
+    base_result = {
+        "financial_result": make_agent_result(
+            status="success",
+            result={
+                "status": "fallback_success",
+                "summary": "금융 계산 LLM 응답이 불안정해 규칙 기반 계산으로 대체했습니다.",
+                "tool_results": [],
+                "calculations": [],
+                "financial_results": [],
+                "fallback_applied": True,
+                "fallback_reason": "rule_based_financial_recovery",
+                "reason": "LLM 호출 실패 또는 시간 초과로 rule-based financial fallback을 사용했습니다.",
+                "source_agent": "financial_agent",
+            },
+            evidence=[],
+            error=None,
+        ),
+        "agent_outputs": dict(state.get("agent_outputs") or {}),
+        "current_step": (state.get("current_step") or 0) + 1,
+        "current_agent": "financial_agent",
+        "completed_agents": list(state.get("completed_agents") or []),
+        "financial_results": [],
+        "context": {
+            **(state.get("context") or {}),
+            "financial_prompt": FINANCIAL_SYSTEM_PROMPT,
+        },
+    }
 
-        return _enforce_financial_role_boundary(result)
-    except Exception as error:
-        return _build_financial_exception_fallback(state, str(error))
+    fallback_result = _augment_recommendation_financial_results(state, base_result)
+    fallback_result = _ensure_financial_calculations(fallback_result)
+    fallback_result = _finalize_financial_rule_fallback(
+        state=state,
+        result=fallback_result,
+        error_message=error_message,
+    )
+    return _enforce_financial_role_boundary(fallback_result)
 
 
 def _build_financial_exception_fallback(state: AgentState, error_message: str) -> dict[str, Any]:
@@ -90,6 +307,157 @@ def _build_financial_exception_fallback(state: AgentState, error_message: str) -
             "financial_prompt": FINANCIAL_SYSTEM_PROMPT,
         },
     }
+
+
+def _finalize_financial_rule_fallback(
+    *,
+    state: AgentState,
+    result: dict[str, Any],
+    error_message: str | None,
+) -> dict[str, Any]:
+    financial_result = result.get("financial_result")
+    if not isinstance(financial_result, dict):
+        return _build_financial_exception_fallback(
+            state,
+            error_message or "financial fallback build failed",
+        )
+
+    payload = financial_result.get("result") or {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    financial_results = payload.get("financial_results")
+    if not isinstance(financial_results, list):
+        financial_results = result.get("financial_results") or []
+    if not isinstance(financial_results, list):
+        financial_results = []
+
+    affordable_products = list(
+        dict.fromkeys(
+            str(item.get("product_name"))
+            for item in financial_results
+            if isinstance(item, dict)
+            and item.get("product_name")
+            and str(item.get("status") or "").strip().lower()
+            not in {"failed", "error", "rejected", "invalid_product"}
+        )
+    )
+
+    calculated_monthly_saving = _extract_monthly_amount_from_customer_profile(state)
+    if calculated_monthly_saving is None:
+        calculated_monthly_saving = _extract_monthly_amount_from_query(_safe_user_query(state))
+
+    expected_interest_summary = _build_expected_interest_summary(financial_results)
+    has_usable_results = any(
+        isinstance(item, dict)
+        and str(item.get("status") or "").strip().lower()
+        in {"calculated", "success", "fallback_success"}
+        for item in financial_results
+    )
+
+    payload["status"] = "fallback_success" if has_usable_results or affordable_products else "needs_check"
+    payload["reason"] = "LLM 호출 실패 또는 시간 초과로 rule-based financial fallback을 사용했습니다."
+    payload["fallback_applied"] = True
+    payload["fallback_reason"] = "rule_based_financial_recovery"
+    payload["calculated_monthly_saving"] = calculated_monthly_saving
+    payload["affordable_products"] = affordable_products
+    payload["expected_interest_summary"] = expected_interest_summary
+    payload["llm_error_recovered"] = bool(error_message)
+    payload["llm_error_type"] = _classify_financial_error(error_message)
+    payload["summary"] = _build_financial_fallback_summary(
+        financial_results=financial_results,
+        affordable_products=affordable_products,
+        expected_interest_summary=expected_interest_summary,
+    )
+
+    financial_result["status"] = "success" if payload["status"] == "fallback_success" else "needs_check"
+    financial_result["result"] = payload
+    financial_result["evidence"] = financial_results
+    financial_result["error"] = None
+
+    agent_outputs = dict(result.get("agent_outputs") or {})
+    agent_outputs["financial_agent"] = financial_result
+
+    completed_agents = list(result.get("completed_agents") or state.get("completed_agents") or [])
+    if "financial_agent" not in completed_agents:
+        completed_agents.append("financial_agent")
+
+    errors = list(state.get("errors") or [])
+    if error_message:
+        errors.append(
+            {
+                "agent": "financial_agent",
+                "error": error_message,
+                "recoverable": True,
+                "user_visible": False,
+                "fallback_applied": True,
+            }
+        )
+
+    return {
+        **result,
+        "messages": [AIMessage(content=payload["summary"])],
+        "agent_outputs": agent_outputs,
+        "completed_agents": completed_agents,
+        "financial_results": financial_results,
+        "financial_result": financial_result,
+        "errors": errors,
+    }
+
+
+def _build_expected_interest_summary(financial_results: list[dict[str, Any]]) -> str:
+    calculated = [
+        item for item in financial_results
+        if isinstance(item, dict) and item.get("estimated_interest") is not None
+    ]
+    if not calculated:
+        return "정확 계산이 어려운 상품은 금리와 우대조건 기준의 정성 평가를 사용했습니다."
+
+    ranked = sorted(
+        calculated,
+        key=lambda item: int(item.get("estimated_interest") or 0),
+        reverse=True,
+    )[:3]
+    parts = []
+    for item in ranked:
+        product_name = str(item.get("product_name") or "상품")
+        rate = item.get("applied_rate")
+        interest = int(item.get("estimated_interest") or 0)
+        if rate is not None:
+            parts.append(f"{product_name}: 예상 세후 이자 약 {interest:,}원, 적용금리 {float(rate):.2f}%")
+        else:
+            parts.append(f"{product_name}: 예상 세후 이자 약 {interest:,}원")
+    return " / ".join(parts)
+
+
+def _build_financial_fallback_summary(
+    *,
+    financial_results: list[dict[str, Any]],
+    affordable_products: list[str],
+    expected_interest_summary: str,
+) -> str:
+    lines = ["금융 계산은 규칙 기반으로 복구해 이어서 추천할 수 있도록 정리했습니다."]
+    if affordable_products:
+        lines.append(f"- 가입 가능 범위에서 검토 가능한 상품: {', '.join(affordable_products)}")
+    if expected_interest_summary:
+        lines.append(f"- 이자 판단 요약: {expected_interest_summary}")
+    if not financial_results:
+        lines.append("- 다만 계산 가능한 상품 정보가 부족해 정밀 이자 계산은 보류했습니다.")
+    return "\n".join(lines)
+
+
+def _classify_financial_error(error_message: str | None) -> str | None:
+    if not error_message:
+        return None
+
+    lowered = error_message.lower()
+    if "toomanyrequests" in lowered or "429" in lowered:
+        return "rate_limit"
+    if "timeout" in lowered:
+        return "timeout"
+    if "provider returned error" in lowered:
+        return "provider_error"
+    return "llm_error"
 
 
 def _augment_maturity_estimate_result(state: AgentState, result: dict) -> dict:

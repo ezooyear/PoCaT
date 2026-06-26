@@ -9,6 +9,7 @@ from typing import Any
 from langchain_core.messages import AIMessage
 
 from agents.base import get_financial_calculations, get_product_candidates, make_agent_result
+from config.settings import get_resolved_llm_model
 from agents.recommend.prompts import RECOMMEND_SYSTEM_PROMPT
 from agents.recommend.tools import (
     build_recommendation_summary,
@@ -24,11 +25,12 @@ EXCLUDED_ELIGIBILITY_STATUSES = {"needs_check", "rejected", "invalid_product"}
 
 
 async def recommend_agent_node(state: AgentState) -> dict:
+    resolved_model = get_resolved_llm_model()
     with langfuse_observation(
         name="recommend_agent",
         as_type="span",
         input=_build_trace_input(state, "recommend_agent"),
-        metadata={"agent": "recommend_agent"},
+        metadata={"agent": "recommend_agent", "resolved_model": resolved_model},
     ) as observation:
         try:
             agent_outputs = dict(state.get("agent_outputs") or {})
@@ -45,7 +47,7 @@ async def recommend_agent_node(state: AgentState) -> dict:
                     "product_candidate_count": len(product_candidates or []),
                     "financial_result_count": len(financial_results or []),
                 },
-                metadata={"agent": "recommend_agent", "step": "prepare_context"},
+                metadata={"agent": "recommend_agent", "step": "prepare_context", "resolved_model": resolved_model},
             ) as step_observation:
                 update_observation(
                     step_observation,
@@ -54,7 +56,7 @@ async def recommend_agent_node(state: AgentState) -> dict:
                         "product_candidates_preview": product_candidates[:5] if isinstance(product_candidates, list) else product_candidates,
                         "financial_preview": financial_results[:5] if isinstance(financial_results, list) else financial_results,
                     },
-                    metadata={"agent": "recommend_agent"},
+                    metadata={"agent": "recommend_agent", "resolved_model": resolved_model},
                 )
 
             normalized_results = _normalize_eligibility_results(eligibility_results)
@@ -214,6 +216,7 @@ async def recommend_agent_node(state: AgentState) -> dict:
                     "task_type": state.get("task_type"),
                     "status": status,
                     "fallback_reason": fallback_reason,
+                    "resolved_model": resolved_model,
                 },
             )
 
@@ -251,6 +254,7 @@ async def recommend_agent_node(state: AgentState) -> dict:
                     "status": fallback["recommend_result"]["result"].get("status"),
                     "fallback_reason": fallback["recommend_result"]["result"].get("fallback_reason"),
                     "error_message": str(error),
+                    "resolved_model": resolved_model,
                 },
             )
             return fallback
@@ -322,7 +326,7 @@ def _filter_usable_financial_results(financial_results: list[dict]) -> list[dict
             continue
 
         status = str(item.get("status") or "").strip().lower()
-        if status in {"needs_check", "failed", "error"}:
+        if status in {"failed", "error"}:
             continue
 
         has_amounts = any(
@@ -336,7 +340,7 @@ def _filter_usable_financial_results(financial_results: list[dict]) -> list[dict
                 "principal",
             )
         )
-        if not has_amounts:
+        if not has_amounts and status not in {"fallback_success", "success"}:
             continue
 
         usable_results.append(dict(item))

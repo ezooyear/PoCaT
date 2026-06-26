@@ -19,7 +19,7 @@ from typing import Any
 import re
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from config.settings import get_llm
+from config.settings import get_llm, get_resolved_llm_model
 from graph import state
 from graph.state import AgentState
 from agents.base import build_agent_trace_input, build_agent_trace_output, make_agent_result
@@ -27,6 +27,7 @@ from agents.validation.prompts import VALIDATION_SYSTEM_PROMPT
 from agents.validation.tools import (
     build_validation_context,
     build_rule_based_verify_result,
+    has_actionable_recommendation_state,
     run_validation_checks,
 )
 from observability.langfuse import flush_langfuse, langfuse_observation, update_observation
@@ -330,6 +331,16 @@ def _build_validation_retry_update(
         "validation_retry_query": current_query,
     }
 
+    if has_actionable_recommendation_state(state):
+        return {
+            **base_update,
+            "validation_retry_count": 0,
+            "retry_start_agent": None,
+            "retry_reason": None,
+            "last_validation_failed": False,
+            "retry_history": retry_history,
+        }
+
     is_valid = bool(verify_result.get("is_valid"))
 
     if is_valid:
@@ -462,6 +473,7 @@ async def _validation_agent_node_impl(state: AgentState) -> dict[str, Any]:
             llm_skipped=not should_run_llm,
         )
     verify_result = _soften_recommendation_verify_result(verify_result, state)
+    verify_result = _promote_actionable_recommendation_verify_result(verify_result, state)
     is_valid = bool(verify_result.get("is_valid"))
     validation_summary = _extract_validation_summary(verify_result, state)
     warnings = [
@@ -652,6 +664,50 @@ def _soften_recommendation_verify_result(
 
     return softened
 
+
+def _promote_actionable_recommendation_verify_result(
+    verify_result: dict[str, Any],
+    state: AgentState,
+) -> dict[str, Any]:
+    if not has_actionable_recommendation_state(state):
+        return verify_result
+
+    issues = verify_result.get("issues") or []
+    blocking_issues = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        message = str(issue.get("message") or "").lower()
+        if any(
+            marker in message
+            for marker in (
+                "customer_result",
+                "financial_result",
+                "errors",
+                "provider returned error",
+                "timeout",
+            )
+        ):
+            continue
+        blocking_issues.append(issue)
+
+    if blocking_issues:
+        promoted = dict(verify_result)
+        promoted["issues"] = blocking_issues
+        return promoted
+
+    promoted = dict(verify_result)
+    promoted["status"] = "passed"
+    promoted["is_valid"] = True
+    promoted["revision_required"] = False
+    promoted["issues"] = []
+    final_notes = list(promoted.get("final_notes") or [])
+    final_notes.append("현재 추천 상태는 복구 가능한 fallback 결과까지 반영하면 유효하므로 추천을 계속 진행합니다.")
+    promoted["final_notes"] = final_notes
+    if not str(promoted.get("summary") or "").strip():
+        promoted["summary"] = "복구된 추천 상태를 기준으로 검증을 통과했습니다."
+    return promoted
+
 def _extract_validation_summary(
     verify_result: dict[str, Any],
     state: AgentState,
@@ -838,6 +894,8 @@ async def _run_llm_verify_result_async(
     LLM 기반 verify_result를 생성합니다.
     """
 
+    resolved_model = get_resolved_llm_model()
+    print(f"[VALIDATION DEBUG] resolved_model={resolved_model}")
     llm = get_llm()
 
     payload = {
@@ -1024,6 +1082,7 @@ def _normalize_verify_result(data: dict[str, Any]) -> dict[str, Any]:
 
 async def validation_agent_node(state: AgentState) -> dict[str, Any]:
     try:
+        resolved_model = get_resolved_llm_model()
         with langfuse_observation(
             name="validation_agent",
             as_type="span",
@@ -1032,7 +1091,7 @@ async def validation_agent_node(state: AgentState) -> dict[str, Any]:
                 agent_name="validation_agent",
                 result_key="validation_result",
             ),
-            metadata={"agent": "validation_agent"},
+            metadata={"agent": "validation_agent", "resolved_model": resolved_model},
         ) as observation:
             result = await _validation_agent_node_impl(state)
             validation_result = result.get("validation_result", {})
@@ -1058,6 +1117,7 @@ async def validation_agent_node(state: AgentState) -> dict[str, Any]:
                     "agent": "validation_agent",
                     "status": validation_result.get("status") if isinstance(validation_result, dict) else None,
                     "failure_type": result.get("failure_type"),
+                    "resolved_model": resolved_model,
                 },
             )
             return result

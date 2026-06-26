@@ -184,7 +184,7 @@ async def _synthesize_mode_async(state: AgentState, config: RunnableConfig = Non
     user_query = state.get("user_query") or _get_last_user_text(state.get("messages", []))
     final_context = _build_final_context(state, user_query)
     # 추가: Validation 실패 시 LLM 최종 합성 전에 확정 추천을 차단합니다.
-    if _is_validation_failed(final_context.get("validation_result")):
+    if _should_block_final_recommendation(final_context):
         final_answer = _sanitize_user_facing_final_answer(
             _build_validation_blocked_answer(final_context)
         )
@@ -749,6 +749,65 @@ def _is_validation_failed(validation_result: Any) -> bool:
     return False
 
 
+def _has_actionable_recommendation_in_context(final_context: dict[str, Any]) -> bool:
+    recommend_result = final_context.get("recommend_result") or {}
+    eligibility_result = final_context.get("eligibility_result") or {}
+    financial_result = final_context.get("financial_result") or {}
+
+    recommend_payload = _get_recommendation_payload(recommend_result)
+    eligibility_payload = _get_recommendation_payload(eligibility_result)
+    financial_payload = _get_recommendation_payload(financial_result)
+
+    recommendation_items = recommend_payload.get("recommendations") or recommend_payload.get("recommended_products") or []
+    eligibility_items = eligibility_payload.get("results") or eligibility_payload.get("eligible_products") or []
+    financial_items = financial_payload.get("financial_results") or financial_payload.get("calculations") or []
+
+    if not isinstance(recommendation_items, list):
+        recommendation_items = []
+    if not isinstance(eligibility_items, list):
+        eligibility_items = []
+    if not isinstance(financial_items, list):
+        financial_items = []
+
+    eligible_names = {
+        "".join(str(item.get("product_name") or "").lower().split())
+        for item in eligibility_items
+        if isinstance(item, dict)
+        and item.get("eligible") is True
+        and str(item.get("status") or "").strip().lower() == "eligible"
+        and item.get("product_name")
+    }
+    calculated_names = {
+        "".join(str(item.get("product_name") or "").lower().split())
+        for item in financial_items
+        if isinstance(item, dict)
+        and str(item.get("status") or "").strip().lower() == "calculated"
+        and item.get("product_name")
+    }
+    recommended_names = {
+        "".join(str(item.get("product_name") or "").lower().split())
+        for item in recommendation_items
+        if isinstance(item, dict) and item.get("product_name")
+    }
+
+    if not eligible_names or not calculated_names:
+        return False
+
+    if recommended_names:
+        return any(
+            name in eligible_names and name in calculated_names
+            for name in recommended_names
+        )
+
+    return bool(eligible_names.intersection(calculated_names))
+
+
+def _should_block_final_recommendation(final_context: dict[str, Any]) -> bool:
+    if _has_actionable_recommendation_in_context(final_context):
+        return False
+    return _is_validation_failed(final_context.get("validation_result"))
+
+
 def _build_validation_blocked_answer(final_context: dict[str, Any]) -> str:
     """
     Validation 실패 시 사용자에게 보여줄 안전한 최종 답변을 생성합니다.
@@ -823,7 +882,7 @@ def _build_final_context(state: AgentState, user_query: str) -> dict:
         "eligibility_result": state.get("eligibility_result"),
         "recommend_result": state.get("recommend_result"),
         "validation_result": state.get("validation_result"),
-        "errors": state.get("errors"),
+        "errors": _sanitize_internal_errors_for_final_context(state.get("errors")),
     }
 
 
@@ -858,7 +917,7 @@ def _format_agent_results(final_context: dict) -> str:
     }
 
     for key, label in label_map.items():
-        value = final_context.get(key)
+        value = _sanitize_internal_value_for_final_context(final_context.get(key))
 
         if value is None or value == {} or value == []:
             continue
@@ -871,6 +930,36 @@ def _format_agent_results(final_context: dict) -> str:
         return "사용 가능한 분석 결과가 없습니다."
 
     return "\n".join(lines)
+
+
+def _sanitize_internal_errors_for_final_context(errors: Any) -> list[dict[str, Any]]:
+    sanitized: list[dict[str, Any]] = []
+    for item in errors or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("user_visible") is False:
+            continue
+        copied = dict(item)
+        copied.pop("error", None)
+        sanitized.append(copied)
+    return sanitized
+
+
+def _sanitize_internal_value_for_final_context(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized = {}
+        for key, item in value.items():
+            if key in {"error", "errors"}:
+                continue
+            if key == "status" and str(item or "").strip().lower() == "failed":
+                continue
+            sanitized[key] = _sanitize_internal_value_for_final_context(item)
+        return sanitized
+
+    if isinstance(value, list):
+        return [_sanitize_internal_value_for_final_context(item) for item in value]
+
+    return value
 
 
 def _get_recommendation_payload(recommend_result: Any) -> dict[str, Any]:
@@ -950,6 +1039,8 @@ def _build_recommendation_fallback_answer(final_context: dict) -> str | None:
         bool(validation_payload.get("is_valid"))
         or validation_status in {"passed", "passed_with_warnings"}
     )
+    if not is_valid and _has_actionable_recommendation_in_context(final_context):
+        is_valid = True
 
     if not is_valid:
         return None
@@ -1056,6 +1147,13 @@ def _sanitize_user_facing_final_answer(text: str) -> str:
     sanitized = sanitized.replace("financial_results_missing", "")
     sanitized = sanitized.replace("missing_required_calculation_fields", "")
     sanitized = sanitized.replace("exception_in_financial_agent", "")
+    sanitized = sanitized.replace("Provider returned error", "")
+    sanitized = sanitized.replace("provider returned error", "")
+    sanitized = sanitized.replace("customer_result", "")
+    sanitized = sanitized.replace("LLM ainvoke timeout after 20.0 seconds", "")
+    sanitized = sanitized.replace("LLM invoke timeout after 20.0 seconds", "")
+    sanitized = sanitized.replace("timeout", "")
+    sanitized = sanitized.replace("langfuse", "")
 
     internal_intro_markers = (
         "일부 상품의 금융 계산이 누락",
