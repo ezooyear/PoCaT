@@ -18,6 +18,7 @@ load_dotenv()
 
 from db.postgres_db import get_connection
 from graph.builder import build_graph
+from graph.request_scope import build_request_messages
 from observability.langfuse import (
     flush_langfuse,
     langfuse_observation,
@@ -433,9 +434,6 @@ if "messages" not in st.session_state:
 
 if "graph" not in st.session_state:
     st.session_state.graph = build_graph()
-
-if "conversation_messages" not in st.session_state:
-    st.session_state.conversation_messages = []
 
 if "langfuse_session_id" not in st.session_state:
     st.session_state.langfuse_session_id = f"streamlit-{uuid4().hex}"
@@ -1204,22 +1202,6 @@ def _extract_explicit_customer_id(prompt: str) -> int | None:
     return None
 
 
-def _build_next_conversation(
-    messages: list, latest_user_prompt: str, latest_ai_content: str
-) -> list[tuple[str, str]]:
-    preserved = []
-
-    for msg in messages:
-        role = msg.get("role")
-        content = msg.get("content")
-        if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
-            preserved.append((role, content))
-
-    preserved.append(("user", latest_user_prompt))
-    preserved.append(("assistant", latest_ai_content))
-    return preserved
-
-
 def _format_yn(value: object) -> str:
     return "충족" if bool(value) else "미충족"
 
@@ -1489,11 +1471,9 @@ def _run_assistant(prompt: str, assistant_slot) -> str:
             f"사용자 질문: {prompt}"
         )
 
-    if explicit_customer_id is not None:
-        graph_messages = [("user", graph_prompt)]
-    else:
-        graph_messages = list(st.session_state.conversation_messages)
-        graph_messages.append(("user", graph_prompt))
+    # UI chat history is preserved separately in Streamlit. Each agent run uses
+    # a fresh graph message list so prior turns cannot leak into the next turn.
+    graph_messages = build_request_messages(graph_prompt)
 
     customer_profile = _build_customer_state_profile(target_customer)
     customer_accounts = target_customer.get("accounts", []) if target_customer else []
@@ -1702,7 +1682,6 @@ def _run_assistant(prompt: str, assistant_slot) -> str:
             raise Exception(msg["content"])
 
     t.join()
-    st.session_state.conversation_messages = graph_messages
     return ai_content
 
 
@@ -1725,11 +1704,6 @@ def _handle_prompt(prompt: str, chat_container=None) -> None:
     try:
         ai_content = _run_assistant(prompt, assistant_slot)
         st.session_state.messages.append({"role": "assistant", "content": ai_content})
-        st.session_state.conversation_messages = _build_next_conversation(
-            st.session_state.messages[:-2],
-            prompt,
-            ai_content,
-        )
         if assistant_slot is not None:
             assistant_slot.empty()
             with assistant_slot.container():
@@ -1797,7 +1771,6 @@ with overview_page:
 
         if customer:
             st.session_state.messages = []
-            st.session_state.conversation_messages = []
             st.session_state.selected_account_index = None
 
     if st.session_state.customer_lookup_error:

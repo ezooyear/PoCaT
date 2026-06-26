@@ -82,6 +82,38 @@ async def _run_required_customer_lookups_async(customer_name: str) -> tuple[list
     return tool_results, tool_errors
 
 
+def _merge_customer_profiles(
+    state_profile: dict[str, Any] | None,
+    fetched_profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep request-scoped profile fields and fill gaps from fetched data."""
+
+    merged = dict(state_profile or {})
+    fetched = dict(fetched_profile or {})
+
+    for key, value in fetched.items():
+        if key not in merged or merged.get(key) in (None, "", [], {}):
+            merged[key] = value
+
+    monthly_amount = (
+        merged.get("monthly_saving_amount")
+        or merged.get("available_monthly_saving")
+        or fetched.get("monthly_saving_amount")
+        or fetched.get("available_monthly_saving")
+    )
+    if monthly_amount not in (None, "", 0):
+        merged["monthly_saving_amount"] = monthly_amount
+        merged.setdefault("available_monthly_saving", monthly_amount)
+
+    if merged and "customer_profile_source" not in merged:
+        if isinstance(state_profile, dict) and state_profile.get("customer_profile_source"):
+            merged["customer_profile_source"] = state_profile["customer_profile_source"]
+        else:
+            merged["customer_profile_source"] = "customer_agent_merged"
+
+    return merged
+
+
 def _build_lookup_summary(customer_name: str, tool_results: list[dict[str, Any]]) -> str:
     sections = [f"{customer_name} 고객 정보 조회 결과입니다."]
     for item in tool_results:
@@ -133,7 +165,10 @@ async def customer_agent_node(state: AgentState) -> dict:
                 ) as evaluation_observation:
                     tool_results, tool_errors = await _run_required_customer_lookups_async(customer_name)
                     summary = _build_lookup_summary(customer_name, tool_results)
-                    customer_profile = _extract_customer_profile(tool_results)
+                    customer_profile = _merge_customer_profiles(
+                        state.get("customer_profile"),
+                        _extract_customer_profile(tool_results),
+                    )
                     update_observation(
                         evaluation_observation,
                         output={

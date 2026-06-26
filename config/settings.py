@@ -36,6 +36,31 @@ clear_blocking_proxy()
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b:free")
+LLM_MAX_OUTPUT_TOKENS = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "4096"))
+
+
+def _resolve_max_output_tokens() -> int:
+    return max(256, min(8192, LLM_MAX_OUTPUT_TOKENS))
+
+
+def _build_openrouter_llm_kwargs(
+    *,
+    model_name: str,
+    temperature: float,
+    streaming: bool,
+) -> dict:
+    max_output_tokens = _resolve_max_output_tokens()
+
+    kwargs = {
+        "model": model_name,
+        "temperature": temperature,
+        "api_key": OPENROUTER_API_KEY,
+        "streaming": streaming,
+        # OpenRouter-compatible cap for all routed models.
+        "max_tokens": max_output_tokens,
+    }
+
+    return kwargs
 
 
 def get_llm(model: str = None, temperature: float = 0, streaming: bool = False):
@@ -50,9 +75,12 @@ def get_llm(model: str = None, temperature: float = 0, streaming: bool = False):
             "OPENROUTER_API_KEY is not set. Add it to the .env file before running the app."
         )
 
+    model_name = model or LLM_MODEL
+
     return ChatOpenRouter(
-        model=model or LLM_MODEL,
-        temperature=temperature,
-        api_key=OPENROUTER_API_KEY,
-        streaming=streaming,
+        **_build_openrouter_llm_kwargs(
+            model_name=model_name,
+            temperature=temperature,
+            streaming=streaming,
+        )
     )
